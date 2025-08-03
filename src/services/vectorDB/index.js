@@ -189,7 +189,38 @@ class VectorDBService {
           }
         }
         
-        // SECOND: After location validation (if any), check if clarification is needed
+        // SECOND: Handle different types of greetings appropriately
+        if (bookingData.responseType === 'greeting_thanks') {
+          console.log(`🐛 DEBUG: Thanks/gratitude detected`);
+          const response = "You're welcome! 😊 Happy to help anytime! 🚗";
+          await this.storeConversation(phone, message, response, { 
+            conversationType: "greeting_thanks",
+            responseType: 'greeting_thanks'
+          });
+          return response;
+        }
+        
+        if (bookingData.responseType === 'greeting_farewell') {
+          console.log(`🐛 DEBUG: Farewell detected`);
+          const response = "Goodbye! 👋 Feel free to message me whenever you need a ride. Have a great day! 🚗";
+          await this.storeConversation(phone, message, response, { 
+            conversationType: "greeting_farewell",
+            responseType: 'greeting_farewell'
+          });
+          return response;
+        }
+        
+        if (bookingData.responseType === 'greeting_start') {
+          console.log(`🐛 DEBUG: Starting greeting detected`);
+          const response = "Hello! 👋 I'm here to help you book a ride. \n\nTo get started, please let me know:\n📍 Where would you like to be picked up from?\n\n(Please provide a specific pickup location - address, landmark, or area name)";
+          await this.storeConversation(phone, message, response, { 
+            conversationType: "greeting_start",
+            responseType: 'greeting_start'
+          });
+          return response;
+        }
+        
+        // THIRD: After greeting handling, check if clarification is needed
         if (bookingData.needsClarification) {
           console.log(`🐛 DEBUG: AI says needs clarification, returning: ${bookingData.clarificationMessage}`);
           await this.storeConversation(phone, message, bookingData.clarificationMessage, { 
@@ -200,7 +231,7 @@ class VectorDBService {
           return bookingData.clarificationMessage;
         }
         
-        // THIRD: If user provided time information, check for conflicts immediately
+        // FOURTH: If user provided time information, check for conflicts immediately
         if (bookingData.responseType === 'time' && bookingData.dateTime) {
           console.log(`⏰ User provided time information, checking for conflicts immediately...`);
           
@@ -668,6 +699,17 @@ class VectorDBService {
           rideId: bookingResult.rideId,
           bookingStatus: "confirmed"
         });
+        
+        // Clear booking context after successful booking to start fresh for next ride
+        const { clearConversationHistory } = require('../conversation/conversationCore');
+        setTimeout(async () => {
+          try {
+            await clearConversationHistory(phone);
+            console.log(`🧹 Booking context cleared for ${phone} after successful driver confirmation booking`);
+          } catch (error) {
+            console.error(`❌ Failed to clear context for ${phone}:`, error);
+          }
+        }, 2000); // Clear after 2 seconds to ensure message is sent first
         
         return successMessage;
       } else {

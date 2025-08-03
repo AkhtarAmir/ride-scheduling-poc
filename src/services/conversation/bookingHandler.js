@@ -54,6 +54,18 @@ async function handleSuccessfulBooking(conversation, rideData, rideResult) {
 
   const successMessage = formatRideConfirmation(rideData, rideResult.rideId, rideData.driverPhone);
   await conversation.addMessage('assistant', successMessage);
+  
+  // Clear booking context after successful booking to start fresh for next ride
+  const { clearConversationHistory } = require('./conversationCore');
+  setTimeout(async () => {
+    try {
+      await clearConversationHistory(conversation.phone);
+      console.log(`🧹 Booking context cleared for ${conversation.phone} after successful ride booking`);
+    } catch (error) {
+      console.error(`❌ Failed to clear context for ${conversation.phone}:`, error);
+    }
+  }, 2000); // Clear after 2 seconds to ensure message is sent first
+  
   return successMessage;
 }
 

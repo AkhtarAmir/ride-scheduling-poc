@@ -2,7 +2,11 @@
 const axios = require("axios");
 require("dotenv").config();
 
-const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "AIzaSyDWetIXYi2QN6RYZvgcggrNlyvv5X6AM2I";
+const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+
+if (!GOOGLE_API_KEY) {
+  throw new Error('GOOGLE_MAPS_API_KEY environment variable is required');
+}
 
 async function validateLocationWithGoogle(location) {
   if (!location || location.length < 3) {
@@ -155,9 +159,11 @@ CRITICAL DRIVER EXTRACTION RULES:
 VALIDATION RULES:
 1. If input is a clear confirmation (yes, okay, sure, etc.) → NO clarification needed
 2. If input is a greeting (hi, hello, hey) → NO clarification needed
-3. If input is vague or unclear for booking purposes → NEEDS clarification
-4. If input is too short or nonsensical → NEEDS clarification
-5. If input contains abusive language or gibberish → NEEDS clarification
+3. If input is gratitude (thanks, thank you) → NO clarification needed
+4. If input is farewell (bye, goodbye) → NO clarification needed
+5. If input is vague or unclear for booking purposes → NEEDS clarification
+6. If input is too short or nonsensical → NEEDS clarification
+7. If input contains abusive language or gibberish → NEEDS clarification
 6. **LOCATION SPECIFICITY REQUIREMENTS:**
    - Only accept the locations that are in the same city as the user's current location
    - Locations must be MORE SPECIFIC than just city names
@@ -257,6 +263,16 @@ DRIVER EXTRACTION LOGIC:
 - If user provided new phone number directly → extract that new number
 - **If user requested auto assignment (auto assign, automatic) → extract null (system will handle auto-assignment)**
 - Otherwise → extract null
+
+**BOOKING STATUS LOGIC:**
+- Use "confirmed" ONLY when user explicitly confirms with clear YES words (yes, okay, ok, sure, proceed, confirm, go ahead)
+- Use "awaiting_confirmation" when all booking data is complete but waiting for user confirmation
+- Use "incomplete" when missing booking data or user provides non-confirmation responses
+- **NEVER use "confirmed" for greetings, thanks, location updates, or unclear responses**
+- Examples:
+  * User says "yes" or "okay" → "confirmed"
+  * User says "thanks" or "hello" → "incomplete" or "awaiting_confirmation" (never "confirmed")
+  * User provides location → "incomplete" or "awaiting_confirmation"
 **LOCATION ACCEPTANCE VALIDATION:**
 - If user input is accepted as a valid pickup location → set acceptedAsLocation: "pickup"
 - If user input is accepted as a valid destination location → set acceptedAsLocation: "destination"  
@@ -273,7 +289,9 @@ DRIVER EXTRACTION LOGIC:
 - Use "rejection" when user rejects or says no
 - Use "phone_number" when user provides a phone number
 - Use "auto_assign_request" when user requests automatic driver assignment (e.g., "auto assign", "automatic", "auto-assign")
-- Use "greeting" for greetings like hi/hello
+- Use "greeting_start" for conversation-starting greetings like hi/hello/good morning/good evening (should start new booking)
+- Use "greeting_thanks" for gratitude expressions like thanks/thank you (should respond with "you're welcome")
+- Use "greeting_farewell" for farewell expressions like bye/goodbye (should respond with goodbye)
 - Use "vague" for unclear responses that need clarification
 - Use "invalid" for inappropriate or nonsensical input
 Return JSON with dateTime in EXACT format "YYYY-MM-DD HH:mm":
@@ -284,7 +302,7 @@ Return JSON with dateTime in EXACT format "YYYY-MM-DD HH:mm":
   "driverPhone": "phone number ONLY if clearly confirmed, otherwise null",
   "bookingStatus": "incomplete|awaiting_confirmation|confirmed",
   "lastResponse": "what user just said",
-  "responseType": "location_name|confirmation|rejection|phone_number|greeting|vague|invalid|time|auto_assign_request",
+  "responseType": "location_name|confirmation|rejection|phone_number|greeting_start|greeting_thanks|greeting_farewell|vague|invalid|time|auto_assign_request",
   "needsClarification": true/false,
   "clarificationMessage": "helpful message asking for clarification (only if needsClarification is true)",
   "inputQuality": "valid|vague|invalid",
