@@ -162,19 +162,31 @@ class VectorDBService {
       if (!isRejectingDriver) {
         // FIRST: If AI accepted something as a location, validate it with Google Maps
         if (bookingData.acceptedAsLocation) {
-          console.log(`🗺️ AI accepted "${message}" as ${bookingData.acceptedAsLocation}, validating with Google Maps`);
+          // Skip validation for locations that appear to be from WhatsApp location sharing
+          // These already came from valid GPS coordinates
+          const looksLikeGeocodedLocation = (
+            message.includes(',') && 
+            message.split(',').length >= 2 &&
+            /\d/.test(message) // Contains numbers (street numbers, postal codes, etc.)
+          );
           
-          const locationValidationResult = await this.handleLocationValidation(phone, message, {
-            shouldValidate: true,
-            locationType: bookingData.acceptedAsLocation,
-            locationToValidate: message
-          }, bookingData);
-          
-          if (locationValidationResult) {
-            console.log(`❌ Google Maps validation failed, returning error message`);
-            return locationValidationResult;
+          if (looksLikeGeocodedLocation) {
+            console.log(`✅ Skipping validation for location that appears to be from WhatsApp location sharing: "${message}"`);
+          } else {
+            console.log(`🗺️ AI accepted "${message}" as ${bookingData.acceptedAsLocation}, validating with Google Maps`);
+            
+            const locationValidationResult = await this.handleLocationValidation(phone, message, {
+              shouldValidate: true,
+              locationType: bookingData.acceptedAsLocation,
+              locationToValidate: message
+            }, bookingData);
+            
+            if (locationValidationResult) {
+              console.log(`❌ Google Maps validation failed, returning error message`);
+              return locationValidationResult;
+            }
+            console.log(`✅ Google Maps validation passed for ${bookingData.acceptedAsLocation} location`);
           }
-          console.log(`✅ Google Maps validation passed for ${bookingData.acceptedAsLocation} location`);
         }
         
         // SECOND: After location validation (if any), check if clarification is needed
@@ -463,13 +475,18 @@ class VectorDBService {
         console.log(`✅ Auto-assigned driver: ${assignedDriver.driverPhone} (${assignedDriver.distance}km away, rating: ${assignedDriver.rating})`);
         
         const { bookRideInternal } = require('../rideService');
+        const { calculateDistance } = require('../mapsService');
+        
+        // Calculate pickup to destination duration (this is what estimatedDuration should be)
+        const { duration: rideDuration } = await calculateDistance(bookingData.from, bookingData.to);
+        
         const bookingResult = await bookRideInternal({
           driverPhone: assignedDriver.driverPhone,
           riderPhone: phone,
           from: bookingData.from,
           to: bookingData.to,
           time: bookingData.dateTime,
-          estimatedDuration: Math.round(assignedDriver.duration) || 30
+          estimatedDuration: Math.round(rideDuration) || 30
         });
         
         if (bookingResult.success) {
@@ -555,13 +572,18 @@ class VectorDBService {
         
         // Actually book the ride
         const { bookRideInternal } = require('../rideService');
+        const { calculateDistance } = require('../mapsService');
+        
+        // Calculate pickup to destination duration (this is what estimatedDuration should be)
+        const { duration: rideDuration } = await calculateDistance(bookingData.from, bookingData.to);
+        
         const bookingResult = await bookRideInternal({
           driverPhone: assignedDriver.driverPhone,
           riderPhone: phone,
           from: bookingData.from,
           to: bookingData.to,
           time: bookingData.dateTime,
-          estimatedDuration: Math.round(assignedDriver.duration) || 30
+          estimatedDuration: Math.round(rideDuration) || 30
         });
         
         if (bookingResult.success) {
