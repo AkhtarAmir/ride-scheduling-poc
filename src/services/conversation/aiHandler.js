@@ -4,14 +4,17 @@ const { bookRide } = require('./bookingHandler');
 const { updateConversationStep } = require('./conversationCore');
 const { formatBookingError } = require('./responseFormatter');
 
-async function processAIMessage(conversation, message, isFromWhatsApp = false) {
+async function processAIMessage(conversation, message) {
   try {
     const history = conversation.getRecentHistory(20); // Increased from 10 to 20 for full context
     const extractedData = await vectorDBService.extractBookingData(conversation.phone, history);
     const hasCompleteData = extractedData.from && extractedData.to && extractedData.dateTime;
     const justProvidedDriver = message.match(/^\+?[0-9]{10,15}$/);
-  
+    
+    console.log(`🤖 AI Handler: Processing message "${message}" for ${conversation.phone}`);
+    console.log(`🤖 AI Handler: Conversation history length: ${history.length}`);
     console.log(`🤖 AI Handler: Extracted data:`, extractedData);
+    console.log(`🤖 AI Handler: hasCompleteData: ${extractedData.dateTime}, justProvidedDriver: ${justProvidedDriver}`);
     
     if (hasCompleteData && justProvidedDriver) {
       console.log(`🤖 AI Handler: User provided driver phone number`);
@@ -28,6 +31,7 @@ async function processAIMessage(conversation, message, isFromWhatsApp = false) {
     
     const isConfirmingBooking = detectBookingConfirmation(message, extractedData);
     
+    console.log(`🤖 AI Handler: User is confirming driver? ${isConfirmingBooking}`);
     
     if (extractedData.from && extractedData.to && extractedData.dateTime && extractedData.driverPhone && isConfirmingBooking) {
       console.log(`🤖 AI Handler: All booking conditions met, proceeding with booking`);
@@ -49,8 +53,7 @@ async function processAIMessage(conversation, message, isFromWhatsApp = false) {
       conversation.phone,
       message,
       history,
-      extractedData, 
-      isFromWhatsApp
+      extractedData // Pass the already extracted data to avoid duplicate AI calls
     );
     
     // Check if message was already handled by another service

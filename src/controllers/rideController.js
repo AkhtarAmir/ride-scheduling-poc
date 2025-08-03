@@ -137,7 +137,7 @@ async function whatsappWebhook(req, res) {
       
       // Process the location message as a normal text message
       console.log(`Processing location as text message: "${locationMessage}"`);
-      const responseMessage = await processConversationMessage(phoneNumber, locationMessage, true);
+      const responseMessage = await processConversationMessage(phoneNumber, locationMessage);
       
       // Send response back via WhatsApp only if there's a message to send
       if (responseMessage) {
@@ -163,10 +163,10 @@ async function whatsappWebhook(req, res) {
       return res.status(200).send('OK');
     }
     
-    console.log(`📱 Processing WhatsApp message from ${phoneNumber}: "${message}"`);
+    console.log(`Processing WhatsApp message from ${phoneNumber}: "${message}"`);
     
-    // Process the conversation
-    const responseMessage = await processConversationMessage(phoneNumber, message, true);
+    // Process the conversation (your existing logic)
+    const responseMessage = await processConversationMessage(phoneNumber, message);
     
     // Send response back via WhatsApp only if there's a message to send
     if (responseMessage) {

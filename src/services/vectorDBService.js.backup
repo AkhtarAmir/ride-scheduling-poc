@@ -1,0 +1,1365 @@
+const { Pinecone } = require("@pinecone-database/pinecone");
+const OpenAI = require("openai");
+const config = require("../config/vectorDB");
+const fetch = require("node-fetch");
+
+class VectorDBService {
+  constructor() {
+    this.pinecone = null;
+    this.openai = null;
+    this.index = null;
+    this.isInitialized = false;
+  }
+
+  async initialize() {
+    try {
+      if (!config.openai.apiKey) {
+        throw new Error("OpenAI API key is required");
+      }
+      this.openai = new OpenAI({
+        apiKey: config.openai.apiKey,
+      });
+
+      if (!config.pinecone.apiKey) {
+        throw new Error("Pinecone API key is required");
+      }
+      this.pinecone = new Pinecone({
+        apiKey: config.pinecone.apiKey,
+        fetchApi: fetch,
+      });
+
+      await this.ensureIndex();
+
+      this.isInitialized = true;
+      console.log("✅ Vector Database Service initialized successfully");
+    } catch (error) {
+      console.error(
+        "❌ Failed to initialize Vector Database Service:",
+        error.message
+      );
+      throw error;
+    }
+  }
+
+  async ensureIndex() {
+    try {
+      const indexName = config.pinecone.indexName;
+      let indexExists = false;
+      try {
+        const indexInfo = await this.pinecone.describeIndex(indexName);
+        indexExists = !!indexInfo;
+        console.log(`✅ Index ${indexName} already exists`);
+      } catch (error) {
+        if (
+          error.message.includes("not found") ||
+          error.message.includes("does not exist")
+        ) {
+          indexExists = false;
+          console.log(`ℹ️ Index ${indexName} does not exist, will create it`);
+        } else {
+          console.error("❌ Error checking index existence:", error.message);
+          throw error;
+        }
+      }
+
+      if (!indexExists) {
+        console.log(`Creating Pinecone index: ${indexName}`);
+
+        await this.pinecone.createIndex({
+          name: indexName,
+          dimension: config.pinecone.dimension || 1536,
+          metric: config.pinecone.metric || "cosine",
+          pods: 1,
+          replicas: 1,
+          podType: "s1.x1",
+          waitUntilReady: true,
+          suppressConflicts: true,
+        });
+
+        console.log(`✅ Index ${indexName} created successfully`);
+      }
+
+      this.index = this.pinecone.index(indexName);
+      console.log(`✅ Pinecone index ready: ${indexName}`);
+    } catch (error) {
+      console.error("❌ Failed to ensure index:", error.message);
+      throw error;
+    }
+  }
+
+  async generateEmbedding(text) {
+    try {
+      const response = await this.openai.embeddings.create({
+        model: config.openai.embeddingModel || "text-embedding-3-small",
+        input: text,
+      });
+      return response.data[0].embedding;
+    } catch (error) {
+      console.error("❌ Failed to generate embedding:", error.message);
+      throw error;
+    }
+  }
+
+  async storeConversation(phone, message, response, metadata = {}) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+
+      const conversationText = `User: ${message}\nAssistant: ${response}`;
+      const embedding = await this.generateEmbedding(conversationText);
+
+      const vector = {
+        id: `${phone}_${Date.now()}`,
+        values: embedding,
+        metadata: {
+          phone,
+          message,
+          response,
+          timestamp: new Date().toISOString(),
+          ...metadata,
+        },
+      };
+
+      await this.index.upsert([vector]);
+      console.log(`✅ Stored conversation for ${phone}`);
+      return vector.id;
+    } catch (error) {
+      console.error("❌ Failed to store conversation:", error.message);
+      throw error;
+    }
+  }
+
+  async findSimilarConversations(message, phone = null, limit = config.conversation?.maxResults || 3) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+
+      const embedding = await this.generateEmbedding(message);
+
+      const queryOptions = {
+        vector: embedding,
+        topK: limit,
+        includeMetadata: true,
+        filter: phone ? { phone: { $eq: phone } } : undefined,
+      };
+
+      const results = await this.index.query(queryOptions);
+
+      const threshold = config.conversation?.similarityThreshold || 0.7;
+
+      const filteredResults = results.matches
+        .filter(match => match.score >= threshold)
+        .map(match => ({
+          id: match.id,
+          score: match.score,
+          metadata: match.metadata,
+        }));
+
+      return filteredResults;
+    } catch (error) {
+      console.error("❌ Failed to find similar conversations:", error.message);
+      return [];
+    }
+  }
+
+  isValidUserMessage(message) {
+    const clean = message.trim().toLowerCase();
+  
+    // Too short
+    if (clean.length < 3) return false;
+  
+    // Only emojis or non-alphanumeric symbols
+    if (!/[a-z0-9]/i.test(clean)) return false;
+  
+    // Repetitive chars (e.g., "aaaaa", ".....", "zzzz")
+    if (/^(.)\1{2,}$/.test(clean)) return false;
+  
+    // Gibberish patterns or low signal content
+    const gibberishPatterns = ['asdf', 'qwer', 'zxcz', 'xytz', 'test', '1234', '0000', 'abc', 'xyz'];
+    if (gibberishPatterns.some(g => clean.includes(g))) return false;
+  
+    // Contains too many repeated symbols or emojis
+    const symbolCount = (clean.match(/[^a-zA-Z0-9\s]/g) || []).length;
+    if (symbolCount / clean.length > 0.5) return false;
+  
+    // Looks like nonsense words
+    if (clean.split(/\s+/).length === 1 && !/[aeiou]/.test(clean)) return false;
+  
+    return true;
+  }
+  
+
+  // Simple helper to format conversation history
+  formatConversationHistory(conversationHistory) {
+    if (!conversationHistory || conversationHistory.length === 0) {
+      return "";
+    }
+
+    const maxHistory = 6; // Keep last 6 messages for context
+    const recentHistory = conversationHistory.slice(-maxHistory);
+    
+    return recentHistory.map(msg => `${msg.role}: ${msg.content}`).join('\n');
+  }
+
+  isTextMessage(whatsappMessage) {
+    // Check if it's a text message type
+    if (whatsappMessage.type && whatsappMessage.type !== 'text') {
+      console.log(`🚫 Non-text message type: ${whatsappMessage.type}`);
+      return false;
+    }
+    
+    // Check if message has text content
+    const messageText = whatsappMessage.text?.body || whatsappMessage.body || '';
+    if (!messageText || typeof messageText !== 'string') {
+      console.log(`🚫 No text content found`);
+      return false;
+    }
+    
+    return true;
+  }
+async generateIntelligentResponse(phone, message, conversationHistory = []) {
+  try {
+    if (!this.isInitialized) {
+      throw new Error("Vector Database Service not initialized");
+    }
+
+    console.log(`🐛 DEBUG: generateIntelligentResponse called for ${phone} with message: "${message}"`);
+    // Extract current booking data
+    const bookingData = await this.extractBookingData(phone, conversationHistory);
+    console.log(`🐛 DEBUG: Extracted booking data:`, bookingData);
+    
+    // **NEW: Check if user is rejecting a driver suggestion**
+    const isRejectingDriver = (message.toLowerCase().trim() === 'no' || 
+                              message.toLowerCase().trim() === 'nope' || 
+                              message.toLowerCase().trim() === 'different driver' ||
+                              message.toLowerCase().trim() === 'new driver' ||
+                              message.toLowerCase().trim() === 'another driver');
+    
+    console.log(`🐛 DEBUG: Is rejecting driver? ${isRejectingDriver}`);
+    
+    if (isRejectingDriver && bookingData.from && bookingData.to && bookingData.dateTime && !bookingData.driverPhone) {
+      // Check if the last message was a driver suggestion by content pattern
+      const recentMessages = conversationHistory.slice(-3);
+      let wasDriverSuggestion = false;
+      
+      for (const msg of recentMessages) {
+        // Check for driver suggestion pattern in message content
+        if (msg.role === 'assistant' && msg.content && msg.content.includes('Driver Suggestion') && msg.content.includes('Would you like to use')) {
+          wasDriverSuggestion = true;
+          console.log(`🔍 Found driver suggestion in recent messages`);
+          break;
+        }
+      }
+      
+      if (wasDriverSuggestion) {
+        console.log(`🚫 User rejected driver suggestion, auto-assigning nearest available driver`);
+        
+        // **AUTO-ASSIGN: Find and assign nearest available driver after rejection**
+        const { findNearestAvailableDrivers } = require('./rideService');
+        const nearestDrivers = await findNearestAvailableDrivers(bookingData.from, bookingData.dateTime, 3);
+        
+        if (nearestDrivers.length > 0) {
+          const assignedDriver = nearestDrivers[0];
+          console.log(`✅ Auto-assigned driver after rejection: ${assignedDriver.driverPhone} (${assignedDriver.distance}km away, rating: ${assignedDriver.rating})`);
+          
+          // **ACTUALLY BOOK THE RIDE: Call the booking service**
+          const { bookRideInternal } = require('./rideService');
+          const bookingResult = await bookRideInternal({
+            driverPhone: assignedDriver.driverPhone,
+            riderPhone: phone,
+            from: bookingData.from,
+            to: bookingData.to,
+            time: bookingData.dateTime,
+            estimatedDuration: Math.round(assignedDriver.duration) || 30
+          });
+          
+          if (bookingResult.success) {
+            const successMessage = `🚗 *Driver Assigned & Ride Booked!*\n\n✅ *Booking Confirmed:*\n📍 *Pickup:* ${bookingData.from}\n🎯 *Destination:* ${bookingData.to}\n⏰ *Time:* ${bookingData.dateTime}\n📱 *Driver:* ${assignedDriver.driverPhone} (${assignedDriver.name})\n🚗 *Vehicle:* ${assignedDriver.vehicleDetails?.make || 'N/A'} ${assignedDriver.vehicleDetails?.model || ''}\n⭐ *Rating:* ${assignedDriver.rating}/5 stars\n📏 *Distance:* ${assignedDriver.distance}km away\n\n🎉 *Ride ID:* ${bookingResult.rideId}\n✅ Your ride has been successfully booked!`;
+            
+            // Store the successful auto-assignment
+            await this.storeConversation(phone, message, successMessage, { 
+              conversationType: "auto_driver_assignment_success",
+              assignedDriver: assignedDriver.driverPhone,
+              rideId: bookingResult.rideId,
+              bookingStatus: "confirmed"
+            });
+            
+            return successMessage;
+          } else {
+            // Booking failed, provide alternative
+            const failureMessage = `⚠️ *Auto-Assignment Failed*\n\nI found a driver (${assignedDriver.driverPhone}) but couldn't complete the booking.\n\n*Reason:* ${bookingResult.message || 'Unknown error'}\n\nPlease either:\n• Try a different time\n• Provide a specific driver's phone number\n• Contact our support for assistance`;
+            
+            await this.storeConversation(phone, message, failureMessage, { 
+              conversationType: "auto_assignment_failed",
+              bookingStatus: "incomplete",
+              failureReason: bookingResult.rejectionReason || 'booking_failed'
+            });
+            
+            return failureMessage;
+          }
+        } else {
+          console.log(`⚠️ No available drivers found for pickup: ${bookingData.from}`);
+          
+          const noDriversMessage = `⚠️ *No Drivers Available*\n\nI couldn't find any available drivers for your location at ${bookingData.dateTime}.\n\nPlease either:\n• Try a different time\n• Provide a specific driver's phone number\n• Contact our support for assistance\n\nWhat would you like to do?`;
+          
+          await this.storeConversation(phone, message, noDriversMessage, { 
+            conversationType: "no_drivers_available_after_rejection",
+            bookingStatus: "incomplete",
+            failureReason: "no_available_drivers"
+          });
+          
+          return noDriversMessage;
+        }
+      }
+    }
+    
+    // Validate and check if input needs clarification (but skip for driver rejections)
+    if (!isRejectingDriver) {
+      // Use AI validation from extractBookingData instead of separate validation
+      if (bookingData.needsClarification) {
+        console.log(`🐛 DEBUG: AI says needs clarification, returning: ${bookingData.clarificationMessage}`);
+        await this.storeConversation(phone, message, bookingData.clarificationMessage, { 
+          conversationType: "clarification_request",
+          bookingStatus: bookingData.bookingStatus,
+          inputQuality: bookingData.inputQuality
+        });
+        return bookingData.clarificationMessage;
+      }
+      
+      // NEW: If AI validation passed and we're collecting a location, validate with Google Maps
+      const needsLocationValidation = this.shouldValidateLocationWithGoogle(message, bookingData);
+      
+      if (needsLocationValidation.shouldValidate) {
+        console.log(`🗺️ AI approved location, validating with Google Maps: "${message}"`);
+        
+        const { validateLocationExists } = require('./mapsService');
+        const googleValidation = await validateLocationExists(message);
+        
+        if (!googleValidation.isValid && !googleValidation.error) {
+          const errorMessage = `❌ I couldn't find "${message}" on the map.\n\nPlease provide a valid ${needsLocationValidation.locationType} location:\n• Try being more specific with the area name\n• Include the city name (e.g., "Main Market, Lahore")\n• Use a nearby landmark\n• Double-check the spelling`;
+          
+          await this.storeConversation(phone, message, errorMessage, { 
+            conversationType: "google_validation_failed",
+            bookingStatus: bookingData.bookingStatus,
+            failedLocation: message,
+            locationType: needsLocationValidation.locationType
+          });
+          
+          return errorMessage;
+        } else {
+          console.log(`✅ Google Maps validation passed for: "${message}"`);
+          if (googleValidation.formattedAddress) {
+            console.log(`📍 Formatted address: ${googleValidation.formattedAddress}`);
+          }
+        }
+      }
+    }
+    
+    // **CHECK FOR DRIVER SUGGESTIONS OR AUTO-ASSIGNMENT**
+    console.log(`🐛 DEBUG: Checking driver suggestion conditions:`);
+    console.log(`  - from: ${bookingData.from ? 'YES' : 'NO'}`);
+    console.log(`  - to: ${bookingData.to ? 'YES' : 'NO'}`);
+    console.log(`  - dateTime: ${bookingData.dateTime ? 'YES' : 'NO'}`);
+    console.log(`  - driverPhone: ${bookingData.driverPhone ? 'YES' : 'NO'}`);
+    
+    if (bookingData.from && bookingData.to && bookingData.dateTime && !bookingData.driverPhone && !isRejectingDriver) {
+      console.log(`🔍 Checking for preferred drivers for destination: ${bookingData.to}`);
+      
+      const preferredDrivers = await this.findPreferredDrivers(phone, bookingData.to, 2);
+      console.log(`🐛 DEBUG: Found ${preferredDrivers.length} preferred drivers:`, preferredDrivers);
+      
+      if (preferredDrivers.length > 0) {
+        console.log(`✅ Found ${preferredDrivers.length} preferred driver(s), suggesting automatically`);
+        
+        const topDriver = preferredDrivers[0];
+        const suggestionMessage = `🚗 *Driver Suggestion*\n\nI see you're going to ${bookingData.to}.\n\nWould you like to use your preferred driver?\n📱 *${topDriver.driverPhone}*\n💡 You've used them ${topDriver.rideCount} times for similar trips\n⭐ Rating: ${topDriver.rating}/5 stars\n\n${preferredDrivers.length > 1 ? `*Other options:*\n${preferredDrivers.slice(1, 3).map((driver, index) => `${index + 2}. ${driver.driverPhone} (${driver.rideCount} rides)`).join('\n')}\n\n` : ''}Reply with "yes" to use this driver, "no" for a different driver, or provide a driver number directly.`;
+        
+        console.log(`🐛 DEBUG: Returning driver suggestion: ${suggestionMessage}`);
+        
+        // Store the suggestion with metadata for later confirmation
+        const alternativeDriversString = preferredDrivers.slice(1, 3)
+        .map(driver => `${driver.driverPhone}:${driver.rideCount}`)
+        .join(',');
+
+        await this.storeConversation(phone, message, suggestionMessage, { 
+          conversationType: "driver_suggestion",
+          suggestedDriver: topDriver.driverPhone,
+          alternativeDrivers: alternativeDriversString,
+          suggestedDriverRides: topDriver.rideCount.toString(),   
+          totalAlternatives: preferredDrivers.length.toString(),
+          bookingStatus: "awaiting_driver_confirmation"
+        });
+        
+        return suggestionMessage;
+      } else {
+        console.log(`ℹ️ No preferred drivers found for ${phone} going to ${bookingData.to}`);
+        
+        // **NEW: Automatically find and assign nearest available driver**
+        console.log(`🔍 Auto-assigning nearest available driver for pickup: ${bookingData.from}`);
+        
+        const { findNearestAvailableDrivers } = require('./rideService');
+        const nearestDrivers = await findNearestAvailableDrivers(bookingData.from, bookingData.dateTime, 3);
+        
+        if (nearestDrivers.length > 0) {
+          const assignedDriver = nearestDrivers[0];
+          console.log(`✅ Auto-assigned driver: ${assignedDriver.driverPhone} (${assignedDriver.distance}km away, rating: ${assignedDriver.rating})`);
+          
+          // **AUTO-ASSIGN: Proceed with booking using the best available driver**
+          const autoAssignMessage = `🚗 *Driver Assigned Automatically*\n\n✅ *Booking Summary:*\n📍 *Pickup:* ${bookingData.from}\n🎯 *Destination:* ${bookingData.to}\n⏰ *Time:* ${bookingData.dateTime}\n📱 *Driver:* ${assignedDriver.driverPhone} (${assignedDriver.name})\n🚗 *Vehicle:* ${assignedDriver.vehicleDetails?.make || 'N/A'} ${assignedDriver.vehicleDetails?.model || ''}\n⭐ *Rating:* ${assignedDriver.rating}/5 stars\n\nProcessing your ride request...`;
+          
+          // Store the auto-assignment
+          await this.storeConversation(phone, message, autoAssignMessage, { 
+            conversationType: "auto_driver_assignment",
+            assignedDriver: assignedDriver.driverPhone,
+            driverDistance: assignedDriver.distance.toString(),
+            driverRating: assignedDriver.rating.toString(),
+            bookingStatus: "confirmed"
+          });
+          
+          return autoAssignMessage;
+        } else {
+          console.log(`⚠️ No available drivers found for pickup: ${bookingData.from}`);
+          
+          const noDriversMessage = `⚠️ *No Drivers Available*\n\nI couldn't find any available drivers for your location at ${bookingData.dateTime}.\n\nPlease either:\n• Try a different time\n• Provide a specific driver's phone number\n• Contact our support for assistance\n\nWhat would you like to do?`;
+          
+          await this.storeConversation(phone, message, noDriversMessage, { 
+            conversationType: "no_drivers_available",
+            bookingStatus: "incomplete",
+            failureReason: "no_available_drivers"
+          });
+          
+          return noDriversMessage;
+        }
+      }
+    } else {
+      console.log(`🐛 DEBUG: Driver suggestion conditions not met, continuing with normal AI response`);
+    }
+    
+    // **Handle driver confirmation when user says yes**  
+    const isConfirmingDriver = (message.toLowerCase().trim() === 'yes' || 
+                               message.toLowerCase().trim() === 'okay' || 
+                               message.toLowerCase().trim() === 'ok' ||
+                               message.toLowerCase().trim() === 'sure');
+    
+    console.log(`🐛 DEBUG: Is confirming driver? ${isConfirmingDriver}`);
+    
+    if (isConfirmingDriver && bookingData.from && bookingData.to && bookingData.dateTime && !bookingData.driverPhone) {
+      console.log(`🐛 DEBUG: User is confirming driver, checking for recent suggestions`);
+      
+      // Check recent conversation for driver suggestion
+      const recentMessages = conversationHistory.slice(-3);
+      let suggestedDriver = null;
+      
+      for (const msg of recentMessages) {
+        if (msg.metadata && msg.metadata.conversationType === 'driver_suggestion') {
+          suggestedDriver = msg.metadata.suggestedDriver;
+          console.log(`🐛 DEBUG: Found suggested driver in history: ${suggestedDriver}`);
+          break;
+        }
+      }
+      
+      if (suggestedDriver) {
+        console.log(`✅ User confirmed suggested driver: ${suggestedDriver}`);
+        
+        // Create booking confirmation message
+        const confirmationMessage = `✅ *Booking Confirmed!*\n\n📍 *Pickup:* ${bookingData.from}\n🎯 *Destination:* ${bookingData.to}\n⏰ *Time:* ${bookingData.dateTime}\n📱 *Driver:* ${suggestedDriver}\n\nProcessing your ride request...`;
+        
+        // Store the confirmation
+        await this.storeConversation(phone, message, confirmationMessage, { 
+          conversationType: "booking_confirmation",
+          confirmedDriver: suggestedDriver,
+          bookingStatus: "confirmed"
+        });
+        
+        return confirmationMessage;
+      }
+    }
+    
+    console.log(`🐛 DEBUG: Continuing with normal AI response generation`);
+    
+    const userContext = await this.getUserBookingContext(phone);
+    
+    const systemPrompt = this.buildSystemPrompt(bookingData, userContext, "", false);
+
+    const formattedHistory = conversationHistory.slice(-6).map(msg => ({
+      role: msg.role === 'assistant' ? 'assistant' : 'user',
+      content: msg.content
+    }));
+    
+    console.log(`🤖 DEBUG: Formatted conversation history for OpenAI:`, formattedHistory);
+    
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...formattedHistory,
+      { role: "user", content: message }
+    ];
+    
+    console.log(`🤖 DEBUG: Final messages array sent to OpenAI:`, JSON.stringify(messages, null, 2));
+    
+    // Also add debug logging to see what OpenAI receives:
+    console.log(`🤖 DEBUG: Sending to OpenAI:`, {
+      model: config.openai.model || "gpt-4o",
+      messagesCount: messages.length,
+      lastSystemPrompt: systemPrompt.substring(0, 200) + "...",
+      lastUserMessage: message
+    });
+    
+    // Quick test to debug what's actually being sent
+    console.log(`🔍 DEBUG: Raw conversation history from DB:`, conversationHistory.slice(-3));
+    console.log(`🔍 DEBUG: Final messages structure:`, messages.map(m => ({ role: m.role, contentLength: m.content?.length })));
+
+    const response = await this.openai.chat.completions.create({
+      model: config.openai.model || "gpt-4o",
+      messages: messages,
+      max_tokens: 350,
+      temperature: 0.6,
+    });
+
+    const aiResponse = response.choices[0].message.content;
+    console.log(`🐛 DEBUG: OpenAI response: ${aiResponse}`);
+
+    // Store conversation and track preferences
+    await this.storeConversation(phone, message, aiResponse, { 
+      conversationType: "ai_generated",
+      bookingStatus: bookingData.bookingStatus
+    });
+
+    // Track booking completion and update preferences
+    if (bookingData.bookingStatus === 'complete' || aiResponse.toLowerCase().includes('booking summary')) {
+      await this.trackBookingCompletion(phone, conversationHistory);
+    }
+
+    return aiResponse;
+
+  } catch (error) {
+    console.error("❌ Failed to generate intelligent response:", error.message);
+    return "I apologize for the confusion. Could you please tell me: pickup location, destination, and preferred time?";
+  }
+}
+
+  
+shouldValidateLocationWithGoogle(message, bookingData) {
+  const cleanMessage = message.toLowerCase().trim();
+  
+  // Skip for confirmation words
+  const confirmationWords = ['yes', 'okay', 'ok', 'sure', 'proceed', 'confirm'];
+  if (confirmationWords.includes(cleanMessage)) {
+    return { shouldValidate: false };
+  }
+  
+  // Skip if not collecting location info
+  if (bookingData.from && bookingData.to) {
+    return { shouldValidate: false };
+  }
+  
+  // Skip for very short inputs that AI should have caught
+  if (cleanMessage.length < 3) {
+    return { shouldValidate: false };
+  }
+  
+  // Skip for obvious phone numbers or times
+  if (/^\+?[0-9\s\-\(\)]+$/.test(cleanMessage) || /^\d{1,2}:\d{2}/.test(cleanMessage)) {
+    return { shouldValidate: false };
+  }
+  
+  // NEW: Use AI's responseType to determine if this is a location
+  if (bookingData.responseType === 'location_name') {
+    const locationType = !bookingData.from ? 'pickup' : 'destination';
+    return { 
+      shouldValidate: true, 
+      locationType: locationType 
+    };
+  }
+  
+  // If AI didn't classify it as a location, don't validate with Google Maps
+  return { shouldValidate: false };
+}
+  // Track booking completion and update preferences
+  async trackBookingCompletion(phone, conversationHistory) {
+    try {
+      if (!this.isInitialized) {
+        return null;
+      }
+
+      // Check if this conversation contains a completed booking
+      const completionKeywords = [
+        'confirmed', 'booked', 'confirmed booking', 'ride confirmed',
+        'booking confirmed', 'proceed', 'go ahead', 'yes book it',
+        'okay book', 'book the ride', 'confirm booking'
+      ];
+      
+      const recentMessages = conversationHistory.slice(-2).map(msg => msg.content.toLowerCase());
+      const hasCompletion = recentMessages.some(msg => 
+        completionKeywords.some(keyword => msg.includes(keyword))
+      );
+      
+      if (!hasCompletion) {
+        return null;
+      }
+
+      // Extract final booking data
+      const bookingData = await this.extractBookingData(phone, conversationHistory);
+      
+      if (bookingData.to && bookingData.driverPhone) {
+        const from = bookingData.from || 'Unknown';
+        const to = bookingData.to;
+        const driverPhone = bookingData.driverPhone;
+        
+        // Record the completed ride to update preferences
+        await this.recordRide(phone, driverPhone, from, to, true);
+        
+        console.log(`✅ Tracked booking completion for ${phone} with driver ${driverPhone} to ${to}`);
+        return { from, to, driverPhone };
+      }
+      
+      return null;
+    } catch (error) {
+      console.error("❌ Failed to track booking completion:", error.message);
+      return null;
+    }
+  }
+
+  // Enhanced booking data extraction with better accuracy
+async extractBookingData(phone, conversationHistory) {
+  try {
+    const historyText = conversationHistory
+      .slice(-10) // Increased from 8 to 10 for better context
+      .map(msg => `${msg.role}: ${msg.content}`)
+      .join('\n');
+    
+    const now = new Date();
+    const currentDate = now.toLocaleDateString('en-GB', { 
+      day: '2-digit', 
+      month: 'long', 
+      year: 'numeric' 
+    });
+    const currentTime = now.toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit', 
+      hour12: true 
+    });
+    
+    // **ENHANCED: Better extraction prompt with validation logic**
+    const extractionPrompt = `Analyze this conversation and extract ride booking information. Also validate if the user's input needs clarification. Return ONLY valid JSON.
+
+CURRENT TIME: ${currentDate} at ${currentTime}
+
+CRITICAL CONTEXT PRESERVATION RULES:
+**IMPORTANT: When extracting data, PRESERVE existing booking information that was previously mentioned in the conversation unless the user is explicitly updating that specific field.**
+
+For example:
+- If conversation shows previous pickup location "dolmen mall" and user only mentions new destination "tech park", preserve "dolmen mall" as pickup
+- If conversation shows previous time "2pm today" and user only mentions new pickup location, preserve "2pm today" as time
+- Only set fields to null if they were never mentioned in the conversation history
+
+CRITICAL DRIVER EXTRACTION RULES:
+1. **ONLY extract driverPhone if user EXPLICITLY confirmed with clear YES words**
+2. **NEVER extract driverPhone from location names, place names, or ambiguous responses**
+3. **Clear YES confirmations:** "yes", "okay", "ok", "sure", "proceed", "confirm", "go ahead"
+4. **NOT confirmations:** Any location name, place name, area name, or unclear response
+
+VALIDATION RULES:
+1. If input is a clear confirmation (yes, okay, sure, etc.) → NO clarification needed
+2. If input is a greeting (hi, hello, hey) → NO clarification needed  
+3. If input is vague or unclear for booking purposes → NEEDS clarification
+4. If input is too short or nonsensical → NEEDS clarification
+5. If input contains abusive language or gibberish → NEEDS clarification
+6. If input is a valid location, time, or phone number → NO clarification needed
+
+VAGUE INPUTS THAT NEED CLARIFICATION:
+- "i don't know", "dunno", "no idea", "not sure"
+- "anytime", "whenever", "doesn't matter", "dont care"
+- "xxxx", "xxx", "idk", "whatever", "up to you"
+- "work", "home", "my home", "my work", "office" (without context)
+- "here", "there", "this place", "that place"
+- "somewhere", "anywhere", "nowhere", "nothing"
+- Very short responses (less than 3 characters)
+- Repetitive characters or obvious gibberish
+
+EXAMPLE SCENARIOS:
+- Assistant suggests driver "03019581634"
+- User says "yes" → Extract: driverPhone: "03019581634", needsClarification: false
+- User says "iqbal town" → Extract: driverPhone: null, needsClarification: false (valid location)
+- User says "dunno" → Extract: driverPhone: null, needsClarification: true
+- User says "03001234567" → Extract: driverPhone: "03001234567", needsClarification: false
+
+CONVERSATION ANALYSIS:
+${historyText}
+
+ANALYZE STEP BY STEP:
+1. What pickup location is mentioned in the ENTIRE conversation history? (preserve if not being updated)
+2. What destination is mentioned in the ENTIRE conversation history? (preserve if not being updated)
+3. What time was mentioned in the ENTIRE conversation history? (preserve if not being updated)
+4. Did assistant suggest a driver? If yes, what was user's response?
+5. Is user's response a clear YES confirmation or something else?
+6. Does the user's input need clarification?
+7. Is the user updating a specific field or providing new information?
+
+CONTEXT PRESERVATION LOGIC:
+- Extract the COMPLETE booking information from the entire conversation history
+- If user is updating destination only, preserve existing pickup and time
+- If user is updating pickup only, preserve existing destination and time  
+- If user is updating time only, preserve existing pickup and destination
+- Only set fields to null if they were NEVER mentioned in the conversation
+
+DRIVER EXTRACTION LOGIC:
+- If assistant suggested driver AND user responded with clear YES → extract that driver
+- If assistant suggested driver AND user responded with anything else → extract null
+- If user provided new phone number directly → extract that new number
+- Otherwise → extract null
+
+Return JSON with dateTime in EXACT format "YYYY-MM-DD HH:mm":
+{
+  "from": "specific pickup location from conversation history or null if never mentioned",
+  "to": "specific destination from conversation history or null if never mentioned", 
+  "dateTime": "YYYY-MM-DD HH:mm format from conversation history or null if never mentioned",
+  "driverPhone": "phone number ONLY if clearly confirmed, otherwise null",
+  "bookingStatus": "incomplete|awaiting_confirmation|confirmed",
+  "lastResponse": "what user just said",
+  "responseType": "location_name|confirmation|rejection|phone_number|greeting|vague|invalid",
+  "needsClarification": true/false,
+  "clarificationMessage": "helpful message asking for clarification (only if needsClarification is true)",
+  "inputQuality": "valid|vague|invalid"
+}
+`;
+
+    const response = await this.openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: extractionPrompt }],
+      max_tokens: 400,
+      temperature: 0.1 // Lower temperature for more consistent extraction
+    });
+
+    try {
+      let jsonStr = response.choices[0].message.content.trim();
+      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+      
+      const result = JSON.parse(jsonStr);
+      
+      console.log(`✅ AI extracted booking data:`, result);
+      console.log(`📝 User response type: ${result.responseType}`);
+      console.log(`🔍 Needs clarification: ${result.needsClarification}`);
+      console.log(`💬 Last response: "${result.lastResponse}"`);
+      
+      // **ADDITIONAL SAFETY CHECK: If response type is location_name, force driverPhone to null**
+      if (result.responseType === 'location_name' || result.responseType === 'other') {
+        console.log(`⚠️ Safety override: User response was ${result.responseType}, setting driverPhone to null`);
+        result.driverPhone = null;
+      }
+      
+      return {
+        from: typeof result.from === 'string' ? result.from : null,
+        to: typeof result.to === 'string' ? result.to : null,
+        dateTime: typeof result.dateTime === 'string' ? result.dateTime : null,
+        driverPhone: typeof result.driverPhone === 'string' ? result.driverPhone : null,
+        bookingStatus: result.bookingStatus || 'incomplete',
+        responseType: result.responseType || 'other',
+        needsClarification: result.needsClarification || false,
+        clarificationMessage: result.clarificationMessage || null,
+        inputQuality: result.inputQuality || 'valid'
+      };
+    } catch (parseError) {
+      console.error("Failed to parse booking extraction:", parseError);
+      return { 
+        from: null, 
+        to: null, 
+        dateTime: null, 
+        driverPhone: null, 
+        bookingStatus: 'incomplete',
+        needsClarification: false,
+        clarificationMessage: null,
+        inputQuality: 'valid'
+      };
+    }
+
+  } catch (error) {
+    console.error("❌ Failed to extract booking data:", error.message);
+    return { 
+      from: null, 
+      to: null, 
+      dateTime: null, 
+      driverPhone: null, 
+      bookingStatus: 'incomplete',
+      needsClarification: false,
+      clarificationMessage: null,
+      inputQuality: 'valid'
+    };
+  }
+}
+
+
+  async getConversationStats() {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+      const stats = await this.index.describeIndexStats();
+      return {
+        totalVectors: stats.totalVectorCount,
+        dimension: stats.dimension,
+        namespaces: stats.namespaces || {},
+      };
+    } catch (error) {
+      console.error("❌ Failed to get conversation stats:", error.message);
+      return null;
+    }
+  }
+
+  async deleteConversations(phone) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+      await this.index.deleteMany({
+        filter: { phone: { $eq: phone } },
+      });
+      console.log(`✅ Deleted conversations for ${phone}`);
+    } catch (error) {
+      console.error("❌ Failed to delete conversations:", error.message);
+      throw error;
+    }
+  }
+
+  // Store driver preference as embedding
+  async storeDriverPreference(phone, driverPhone, from, to, rideCount = 1, rating = 5) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+
+      // Check if this preference already exists to avoid duplicates
+      const existingDrivers = await this.findPreferredDrivers(phone, to, 1);
+      const existingDriver = existingDrivers.find(d => d.driverPhone === driverPhone);
+      
+      if (existingDriver) {
+        console.log(`🔄 Updating existing driver preference for ${phone} with driver ${driverPhone} (current rides: ${existingDriver.rideCount}, new rides: ${rideCount})`);
+      } else {
+        console.log(`➕ Storing new driver preference for ${phone} with driver ${driverPhone} (rides: ${rideCount})`);
+      }
+
+      // Create preference text for embedding
+      const preferenceText = `User ${phone} prefers driver ${driverPhone} for rides from ${from} to ${to}. Used ${rideCount} times. Rating: ${rating}/5 stars.`;
+      const embedding = await this.generateEmbedding(preferenceText);
+
+      const vector = {
+        id: `driver_pref_${phone}_${driverPhone}_${Date.now()}`,
+        values: embedding,
+        metadata: {
+          type: 'driver_preference',
+          phone,
+          driverPhone,
+          from,
+          to,
+          rideCount,
+          rating,
+          timestamp: new Date().toISOString(),
+        },
+      };
+
+      await this.index.upsert([vector]);
+      console.log(`✅ Stored driver preference for ${phone} with driver ${driverPhone}`);
+      return vector.id;
+    } catch (error) {
+      console.error("❌ Failed to store driver preference:", error.message);
+      throw error;
+    }
+  }
+
+  // Enhanced driver preference finding
+  async findPreferredDrivers(phone, to, minRides = 2) {
+    try {
+      if (!this.isInitialized) {
+        return [];
+      }
+
+      // Use multiple search strategies
+      const searchQueries = [
+        `User ${phone} driver preferences destination ${to}`,
+        `${phone} preferred driver ${to}`,
+        `driver for ${to} user ${phone}`
+      ];
+
+      let allResults = [];
+
+      for (const query of searchQueries) {
+        const embedding = await this.generateEmbedding(query);
+        
+        const queryOptions = {
+          vector: embedding,
+          topK: 10,
+          includeMetadata: true,
+          filter: { 
+            type: { $eq: 'driver_preference' },
+            phone: { $eq: phone }
+          },
+        };
+
+        const results = await this.index.query(queryOptions);
+        allResults.push(...results.matches);
+      }
+
+      // Remove duplicates and process - use driver phone as unique key
+      const uniqueDrivers = new Map();
+      allResults.forEach(match => {
+        const driverPhone = match.metadata.driverPhone;
+        const existingDriver = uniqueDrivers.get(driverPhone);
+        
+        // Keep the driver with the highest ride count and score
+        if (!existingDriver || 
+            match.metadata.rideCount > existingDriver.rideCount ||
+            (match.metadata.rideCount === existingDriver.rideCount && match.score > existingDriver.score)) {
+          uniqueDrivers.set(driverPhone, {
+            driverPhone: match.metadata.driverPhone,
+            from: match.metadata.from,
+            to: match.metadata.to,
+            rideCount: match.metadata.rideCount || 1,
+            rating: match.metadata.rating || 5,
+            score: match.score,
+            reason: `Used ${match.metadata.rideCount || 1} times for trips to ${match.metadata.to}`
+          });
+        }
+      });
+
+      const preferredDrivers = Array.from(uniqueDrivers.values())
+        .filter(driver => driver.score >= 0.2) // Lower threshold
+        .filter(driver => driver.rideCount >= minRides)
+        .sort((a, b) => b.rideCount - a.rideCount || b.score - a.score);
+
+      console.log(`📋 Found ${preferredDrivers.length} unique preferred drivers for ${phone} going to ${to}`);
+      return preferredDrivers;
+    } catch (error) {
+      console.error("❌ Failed to find preferred drivers:", error.message);
+      return [];
+    }
+  }
+
+  // Check if user has preferred drivers for a destination
+  async hasPreferredDrivers(phone, to, minRides = 3) {
+    try {
+      const drivers = await this.findPreferredDrivers(phone, to, minRides);
+      return drivers.length > 0;
+    } catch (error) {
+      console.error("❌ Failed to check preferred drivers:", error.message);
+      return false;
+    }
+  }
+
+  // Record a completed ride to update preferences
+  async recordRide(phone, driverPhone, from, to, success = true) {
+    try {
+      if (!this.isInitialized) {
+        console.warn("Vector DB not initialized, skipping ride recording");
+        return;
+      }
+
+      // Find existing preference to update ride count
+      const existingDrivers = await this.findPreferredDrivers(phone, to, 1);
+      const existingDriver = existingDrivers.find(d => d.driverPhone === driverPhone);
+      
+      const newRideCount = existingDriver ? existingDriver.rideCount + 1 : 1;
+      
+      // Store updated preference
+      await this.storeDriverPreference(phone, driverPhone, from, to, newRideCount, 5);
+      
+      console.log(`✅ Recorded ride for ${phone} with driver ${driverPhone} (total rides: ${newRideCount})`);
+    } catch (error) {
+      console.error("❌ Failed to record ride:", error.message);
+      // Don't fail the main flow if preference recording fails
+    }
+  }
+
+  // Format driver suggestion message
+  formatDriverSuggestion(drivers, to) {
+    if (!drivers || drivers.length === 0) {
+      return null;
+    }
+    
+    const topDriver = drivers[0];
+    
+    let message = `🚗 *Driver Suggestion*\n\n`;
+    message += `I see you're going to ${to}.\n\n`;
+    message += `Would you like to use your preferred driver?\n`;
+    message += `📱 *${topDriver.driverPhone}*\n`;
+    message += `💡 ${topDriver.reason}\n`;
+    // message += `⭐ Rating: ${topDriver.rating}/5 stars\n\n`;
+    
+    if (drivers.length > 1) {
+      message += `*Other options:*\n`;
+      drivers.slice(1, 3).forEach((driver, index) => {
+        message += `${index + 2}. ${driver.driverPhone} (${driver.reason})\n`;
+      });
+    }
+    
+    message += `\nReply with the driver number or "new driver" for a different driver.`;
+    
+    return message;
+  }
+
+  // Detect if user wants to book a ride
+  detectBookingIntent(message, conversationHistory = []) {
+    const bookingKeywords = [
+      'book', 'booking', 'ride', 'taxi', 'cab', 'car', 'driver',
+      'pickup', 'pick me up', 'need a ride', 'want to go',
+      'transport', 'travel', 'drive', 'lift'
+    ];
+    
+    const messageLower = message.toLowerCase();
+    const hasBookingKeyword = bookingKeywords.some(keyword => 
+      messageLower.includes(keyword)
+    );
+    
+    // Check if this is a new booking conversation
+    const recentMessages = conversationHistory.slice(-3);
+    const hasRecentBooking = recentMessages.some(msg => 
+      bookingKeywords.some(keyword => msg.content.toLowerCase().includes(keyword))
+    );
+    
+    return hasBookingKeyword || hasRecentBooking;
+  }
+
+  // Extract and store driver preferences when booking starts
+  async extractAndStoreDriverPreferences(phone, message, conversationHistory = []) {
+    try {
+      if (!this.isInitialized) {
+        return null;
+      }
+
+      // Extract booking data from conversation
+      const bookingData = await this.extractBookingData(phone, conversationHistory);
+      
+      // Only store preferences if we have destination and driver info
+      if (bookingData.to && bookingData.driverPhone) {
+        const from = bookingData.from || 'Unknown';
+        const to = bookingData.to;
+        const driverPhone = bookingData.driverPhone;
+        
+        // Check if this preference already exists
+        const existingDrivers = await this.findPreferredDrivers(phone, to, 1);
+        const existingDriver = existingDrivers.find(d => d.driverPhone === driverPhone);
+        
+        if (existingDriver) {
+          // Update existing preference with new ride count
+          const newRideCount = existingDriver.rideCount + 1;
+          await this.storeDriverPreference(phone, driverPhone, from, to, newRideCount, 5);
+          console.log(`✅ Updated driver preference for ${phone} with driver ${driverPhone} (total rides: ${newRideCount})`);
+        } else {
+          // Store new preference
+          await this.storeDriverPreference(phone, driverPhone, from, to, 1, 5);
+          console.log(`✅ Stored new driver preference for ${phone} with driver ${driverPhone}`);
+        }
+        
+        return { from, to, driverPhone };
+      }
+      
+      return null;
+    } catch (error) {
+      console.error("❌ Failed to extract and store driver preferences:", error.message);
+      return null;
+    }
+  }
+
+  // Update driver preferences when user expresses new preferences
+  async updateDriverPreferences(phone, message, conversationHistory = []) {
+    try {
+      if (!this.isInitialized) {
+        return null;
+      }
+
+      // Check if user is expressing a preference for a specific driver
+      const preferenceKeywords = [
+        'prefer', 'preferred', 'favorite', 'usual', 'same driver',
+        'that driver', 'him', 'her', 'this driver', 'my driver'
+      ];
+      
+      const messageLower = message.toLowerCase();
+      const hasPreferenceKeyword = preferenceKeywords.some(keyword => 
+        messageLower.includes(keyword)
+      );
+      
+      if (!hasPreferenceKeyword) {
+        return null;
+      }
+
+      // Extract booking data to get context
+      const bookingData = await this.extractBookingData(phone, conversationHistory);
+      
+      if (bookingData.to && bookingData.driverPhone) {
+        const from = bookingData.from || 'Unknown';
+        const to = bookingData.to;
+        const driverPhone = bookingData.driverPhone;
+        
+        // Check if this is a new preference or updating existing
+        const existingDrivers = await this.findPreferredDrivers(phone, to, 1);
+        const existingDriver = existingDrivers.find(d => d.driverPhone === driverPhone);
+        
+        if (existingDriver) {
+          // Update existing preference
+          const newRideCount = existingDriver.rideCount + 1;
+          await this.storeDriverPreference(phone, driverPhone, from, to, newRideCount, 5);
+          console.log(`✅ Updated driver preference for ${phone} with driver ${driverPhone} (total rides: ${newRideCount})`);
+        } else {
+          // Store new preference
+          await this.storeDriverPreference(phone, driverPhone, from, to, 1, 5);
+          console.log(`✅ Stored new driver preference for ${phone} with driver ${driverPhone}`);
+        }
+        
+        return { from, to, driverPhone };
+      }
+      
+      return null;
+    } catch (error) {
+      console.error("❌ Failed to update driver preferences:", error.message);
+      return null;
+    }
+  }
+
+  // Get user's booking history and preferences
+  async getUserBookingContext(phone) {
+    try {
+      if (!this.isInitialized) {
+        return null;
+      }
+
+      // Get recent conversations
+      const recentConversations = await this.findSimilarConversations("", phone, 5);
+      
+      // Get user's preferred drivers
+      const allPreferredDrivers = await this.index.query({
+        vector: await this.generateEmbedding(`User ${phone} driver preferences`),
+        topK: 10,
+        includeMetadata: true,
+        filter: { 
+          type: { $eq: 'driver_preference' },
+          phone: { $eq: phone }
+        },
+      });
+
+      const preferredDrivers = allPreferredDrivers.matches
+        .filter(match => match.score >= 0.3)
+        .map(match => ({
+          driverPhone: match.metadata.driverPhone,
+          from: match.metadata.from,
+          to: match.metadata.to,
+          rideCount: match.metadata.rideCount,
+          rating: match.metadata.rating,
+          lastUsed: match.metadata.timestamp
+        }))
+        .sort((a, b) => b.rideCount - a.rideCount);
+
+      // Get recent destinations
+      const recentDestinations = recentConversations
+        .filter(conv => conv.metadata.response && conv.metadata.response.includes('Destination:'))
+        .map(conv => {
+          const destMatch = conv.metadata.response.match(/Destination:\s*([^\n]+)/);
+          return destMatch ? destMatch[1].trim() : null;
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+
+      return {
+        recentConversations: recentConversations.length,
+        preferredDrivers: preferredDrivers.slice(0, 5), // Top 5 preferred drivers
+        recentDestinations: [...new Set(recentDestinations)], // Remove duplicates
+        totalRides: preferredDrivers.reduce((sum, driver) => sum + driver.rideCount, 0)
+      };
+    } catch (error) {
+      console.error("❌ Failed to get user booking context:", error.message);
+      return null;
+    }
+  }
+
+  // Build comprehensive system prompt
+  buildSystemPrompt(bookingData, userContext, driverSuggestionContext, shouldSuggestDrivers) {
+    const now = new Date();
+    const currentDate = now.toLocaleDateString('en-GB', { 
+      day: '2-digit', 
+      month: 'long', 
+      year: 'numeric' 
+    });
+    const currentTime = now.toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit', 
+      hour12: true 
+    });
+
+    let currentBookingStatus = "";
+    if (bookingData.from || bookingData.to || bookingData.dateTime || bookingData.driverPhone) {
+      currentBookingStatus = `\n\nCURRENT BOOKING STATUS:
+📍 Pickup: ${bookingData.from || '❌ MISSING'}
+🎯 Destination: ${bookingData.to || '❌ MISSING'}  
+⏰ Time: ${bookingData.dateTime || '❌ MISSING'}
+📞 Driver: ${bookingData.driverPhone || '❌ MISSING'}
+
+NEXT ACTION NEEDED: ${this.getNextAction(bookingData, shouldSuggestDrivers)}`;
+    }
+
+    let userContextInfo = "";
+    if (userContext && userContext.preferredDrivers.length > 0) {
+      userContextInfo = `\n\nUSER CONTEXT:
+- Total rides: ${userContext.totalRides}
+- Preferred drivers: ${userContext.preferredDrivers.length}
+${userContext.preferredDrivers.slice(0, 3).map(d => `  * ${d.driverPhone} (${d.rideCount} rides to ${d.to})`).join('\n')}`;
+    }
+
+    return `You are a professional WhatsApp ride booking assistant. 
+
+CURRENT DATE & TIME: ${currentDate} at ${currentTime}
+
+BOOKING REQUIREMENTS (in order):
+1. Pickup location (FROM) - Must be specific (address, landmark, or area description)
+2. Destination (TO) - Must be specific (address, landmark, or area description)
+3. Date and time - Must be specific (e.g., "3pm today", "tomorrow 9am")
+4. Driver phone number - OPTIONAL (system can auto-assign if not specified)
+
+AUTOMATIC DRIVER ASSIGNMENT:
+- If user has preferred drivers, suggest them first
+- If no preferred drivers OR user doesn't specify, system automatically finds and assigns the nearest available driver
+- System considers: distance, rating, availability, and experience
+- Driver selection is OPTIONAL - users don't need to provide a driver number
+
+UPDATE REQUEST PROTOCOL:
+- If user wants to update/change pickup location, ask for new pickup location
+- If user wants to update/change destination, ask for new destination  
+- If user wants to update/change time/pickup time/drop off time, ask for new time 
+- If user says update/change ride/request without specifying what, ask what do they want to update
+- If user wants to update/change driver phone number, ask for new driver phone number
+- If user says "update location" without specifying which one, ask which location (pickup or destination)
+- If user wants to update/change any of the above, ask for confirmation before updating
+- if user wants to keep the same pickup location, destination, time, driver phone number, proceed with next step
+
+CLARIFICATION PROTOCOL:
+- If user says i want to book another ride, or asks for next ride, start fresh
+- If user provides vague inputs like "work", "home", "here", "there", "my home", "my office", "my house" → Ask for specific details
+- If user provides very short responses → Ask for more details
+- If user provides name of human being or any thing as materialistic, as pickup or destination → Explain that you dont understand
+- If user provides unclear time references → Ask for specific time
+- If user says "i don't know", "anytime", "xxxx", gibberish text, abusive words → Ask for clarification
+- Always ask for ONE missing piece at a time
+- Provide examples of what you need (address, landmark, area description)
+- Don't get stuck in loops - if user is unhelpful, suggest reasonable defaults
+- Dont't accept old or past dates or times, accept only future dates for 3 months from today
+
+
+CONFLICT RESOLUTION PROTOCOL:
+- If driver conflict detected: Suggest alternative drivers from user's preferences or auto-assign a different driver
+- If rider conflict detected: Suggest alternative times around the requested time
+- Always be helpful and provide clear next steps
+- Don't confuse pickup and destination locations
+
+RESTART PROTOCOL:
+- If user says "book another ride", "new ride", "restart", etc. → Start completely fresh
+- Clear all previous booking information 
+- Ask for pickup location as if it's the first message
+- Don't reference any previous booking details
+- Treat as a brand new conversation
+
+DRIVER SELECTION PROTOCOL:
+- When you have pickup + destination + time → AUTOMATICALLY proceed with booking
+- If user has preferred drivers, suggest them with option to confirm
+- If no preferred drivers OR user doesn't specify → system auto-assigns best available driver
+- Users can optionally provide a specific driver number anytime
+- If user says yes/okay/sure to suggested driver → use that driver
+- If user says no to suggested driver → auto-assign nearest available instead
+
+CONFLICT HANDLING:
+- Driver conflicts: "Your preferred driver isn't available. I'll assign the best available driver instead."
+- Rider conflicts: "You have a conflicting appointment. Here are some alternative times: [list times]"
+- Always provide clear next steps for resolution${currentBookingStatus}${userContextInfo}${driverSuggestionContext}
+
+RESPONSE GUIDELINES:
+- If user greets or says hello, say hello back and ask how you can help
+- Be natural and conversational
+- Acknowledge what's already collected
+- Ask for ONE missing piece at a time
+- Don't repeat information that's already confirmed
+- When suggesting drivers, be proactive but not pushy
+- Handle conflicts gracefully with helpful suggestions
+- If user input is unclear, ask for clarification with specific examples
+- If user is consistently unhelpful, suggest reasonable defaults and ask for confirmation
+- Don't get stuck asking the same question repeatedly
+- REMEMBER: Driver selection is OPTIONAL - proceed with booking once you have pickup, destination, and time`;
+  }
+
+  // Determine next action needed
+  getNextAction(bookingData, shouldSuggestDrivers) {
+    if (!bookingData.from) return "Ask for pickup location";
+    if (!bookingData.to) return "Ask for destination";
+    if (!bookingData.dateTime) return "Ask for date/time";
+    if (!bookingData.driverPhone && shouldSuggestDrivers) return "Suggest preferred driver or auto-assign";
+    if (!bookingData.driverPhone) return "Auto-assign nearest available driver";
+    return "Show complete booking summary";
+  }
+
+  // Clean up duplicate driver preferences
+  async cleanupDuplicateDriverPreferences(phone) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error("Vector Database Service not initialized");
+      }
+
+      console.log(`🧹 Cleaning up duplicate driver preferences for ${phone}...`);
+
+      // Get all driver preferences for this user
+      const allPreferences = await this.index.query({
+        vector: await this.generateEmbedding(`User ${phone} driver preferences`),
+        topK: 100,
+        includeMetadata: true,
+        filter: { 
+          type: { $eq: 'driver_preference' },
+          phone: { $eq: phone }
+        },
+      });
+
+      // Group by driver phone and keep only the best entry for each driver
+      const driverGroups = new Map();
+      
+      allPreferences.matches.forEach(match => {
+        const driverPhone = match.metadata.driverPhone;
+        const existing = driverGroups.get(driverPhone);
+        
+        if (!existing || 
+            match.metadata.rideCount > existing.rideCount ||
+            (match.metadata.rideCount === existing.rideCount && match.score > existing.score)) {
+          driverGroups.set(driverPhone, match);
+        }
+      });
+
+      // Find entries to delete (all except the best one for each driver)
+      const entriesToDelete = allPreferences.matches.filter(match => {
+        const driverPhone = match.metadata.driverPhone;
+        const bestEntry = driverGroups.get(driverPhone);
+        return match.id !== bestEntry.id;
+      });
+
+      if (entriesToDelete.length > 0) {
+        console.log(`🗑️ Found ${entriesToDelete.length} duplicate entries to delete`);
+        
+        // Delete duplicate entries
+        const deleteIds = entriesToDelete.map(entry => entry.id);
+        await this.index.deleteMany({
+          ids: deleteIds
+        });
+        
+        console.log(`✅ Deleted ${deleteIds.length} duplicate driver preference entries`);
+      } else {
+        console.log(`✅ No duplicate entries found for ${phone}`);
+      }
+
+      return {
+        totalEntries: allPreferences.matches.length,
+        uniqueDrivers: driverGroups.size,
+        deletedEntries: entriesToDelete.length
+      };
+    } catch (error) {
+      console.error("❌ Failed to cleanup duplicate driver preferences:", error.message);
+      throw error;
+    }
+  }
+}
+
+// Create singleton instance
+const vectorDBService = new VectorDBService();
+
+module.exports = vectorDBService;

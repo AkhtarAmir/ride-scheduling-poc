@@ -1,5 +1,4 @@
-const { googleMapsClient } = require('../../../config/google');
-const { validateLocationComponents } = require('../utils/validationUtils');
+const { googleMapsClient } = require('../config/google');
 
 async function calculateDistance(from, to) {
   try {
@@ -86,13 +85,94 @@ async function validateLocationExists(locationText) {
 
     if (response.data.status === 'OK' && response.data.results.length > 0) {
       const result = response.data.results[0];
-      const validationResult = validateLocationComponents(result);
+      const components = result.address_components || [];
+      const types = result.types || [];
+      
+      // Enhanced validation using address components (Address Line 1, 2, 3 approach)
+      let confidence = 0.1;
+      let isValid = false;
+      let reason = '';
+      let locationType = 'unknown';
 
-      console.log(`✅ Location validation result: ${validationResult.isValid ? 'Valid' : 'Invalid'} (${(validationResult.confidence * 100).toFixed(1)}% confidence)`);
+      // Helper function to get component by type
+      const getComponent = (type) => {
+        const comp = components.find(c => c.types.includes(type));
+        return comp ? comp.long_name : null;
+      };
+
+      const streetNumber = getComponent('street_number');
+      const route = getComponent('route');
+      const neighborhood = getComponent('neighborhood') || getComponent('sublocality') || getComponent('sublocality_level_1');
+      const locality = getComponent('locality') || getComponent('administrative_area_level_2');
+      const establishment = getComponent('establishment');
+      const pointOfInterest = getComponent('point_of_interest');
+
+      // Address Line 1: Street level validation (most specific)
+      if (streetNumber && route) {
+        confidence = 0.9;
+        locationType = 'street_address';
+        isValid = true;
+        reason = 'Complete street address found';
+      }
+      // Address Line 2: Establishment/Landmark with context
+      else if (establishment || pointOfInterest) {
+        confidence = 0.6;
+        locationType = 'establishment';
+        
+        // Check if establishment has location context
+        const hasContext = neighborhood || locality || route || 
+                          locationText.split(' ').length >= 3;
+        
+        if (hasContext) {
+          confidence = 0.7;
+          isValid = true;
+          reason = 'Specific business/landmark location found';
+        } else {
+          isValid = false;
+          reason = 'Business found but location too vague - please add area/street details';
+        }
+      }
+      // Address Line 3: Area with street reference
+      else if (route && (neighborhood || locality)) {
+        confidence = 0.6;
+        locationType = 'neighborhood';
+        isValid = true;
+        reason = 'Area with street reference found';
+      }
+      // Major landmarks/institutions
+      else if (types.includes('hospital') || types.includes('shopping_mall') || 
+               types.includes('airport') || types.includes('university') ||
+               types.includes('transit_station') || types.includes('school')) {
+        confidence = 0.7;
+        locationType = 'landmark';
+        isValid = true;
+        reason = 'Major landmark suitable for ride booking';
+      }
+      // Just city/large area (reject)
+      else if (locality && !neighborhood && !route && !establishment) {
+        confidence = 0.1;
+        locationType = 'city_only';
+        isValid = false;
+        reason = 'Only city found - please provide specific area, street, or landmark';
+      }
+      // Approximate location (low confidence)
+      else if (result.geometry.location_type === 'APPROXIMATE') {
+        confidence = 0.3;
+        locationType = 'approximate';
+        isValid = false;
+        reason = 'Location too approximate - please provide more specific details';
+      }
+      else {
+        confidence = 0.4;
+        isValid = false;
+        reason = 'Location found but not specific enough for pickup/dropoff';
+      }
+
+      console.log(`✅ Location validation result: ${isValid ? 'Valid' : 'Invalid'} (${(confidence * 100).toFixed(1)}% confidence)`);
       console.log(`📍 Formatted: ${result.formatted_address}`);
       
       return {
-        ...validationResult,
+        isValid: isValid,
         formattedAddress: result.formatted_address,
         coordinates: {
           lat: result.geometry.location.lat,
@@ -100,6 +180,10 @@ async function validateLocationExists(locationText) {
         },
         placeId: result.place_id,
         types: result.types,
+        confidence: confidence,
+        locationType: locationType,
+        reason: reason,
+        suggestion: !isValid ? `Try: "${locationText} [Street Address], [City]"` : null,
         // Include information about multiple results
         isAmbiguous: response.data.results.length > 1,
         totalResults: response.data.results.length,
@@ -200,8 +284,25 @@ async function reverseGeocode(latitude, longitude) {
   }
 }
 
+async function canCalculateDistance(from, to) {
+  try {
+    const result = await calculateDistance(from, to);
+    return {
+      canCalculate: result.distance !== null && result.duration !== null,
+      distance: result.distance,
+      duration: result.duration
+    };
+  } catch (error) {
+    return {
+      canCalculate: false,
+      error: error.message
+    };
+  }
+}
+
 module.exports = {
   calculateDistance,
   validateLocationExists,
+  canCalculateDistance,
   reverseGeocode
-}; 
+};

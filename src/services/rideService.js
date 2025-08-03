@@ -7,9 +7,6 @@ const { sendNotification } = require('./notificationService');
 const vectorDBService = require('./vectorDBService');
 const moment = require('moment');
 
-// Import the clearConversationHistory function to clear context after successful bookings
-const { clearConversationHistory } = require('./conversation/conversationCore');
-
 async function findNearestAvailableDrivers(pickupLocation, requestedTime, maxResults = 5) {
   try {
     console.log(`🔍 Finding nearest drivers for pickup: ${pickupLocation}`);
@@ -203,150 +200,15 @@ async function updateDriverLocation(driverPhone, newLocation) {
   }
 }
 
-async function validateDriverPickupDistance(driverPhone, pickupLocation, requestedTime) {
+async function validateDriverPickupDistance(driverPhone, pickupLocation) {
   try {
     console.log(`🔍 Validating driver pickup distance for ${driverPhone}`);
-    
-    // Check if ride is for a future date (more than 4 hours in advance)
-    if (requestedTime) {
-      const now = new Date();
-      const rideTime = new Date(requestedTime);
-      const hoursUntilRide = (rideTime - now) / (1000 * 60 * 60); // in hours
-      const FUTURE_BOOKING_THRESHOLD_HOURS = 4;
-      
-      if (hoursUntilRide > FUTURE_BOOKING_THRESHOLD_HOURS) {
-        console.log(`🔍 Future booking detected (${Math.round(hoursUntilRide)} hours from now), checking for existing rides on same date`);
-        
-        // Check for existing rides on the same date
-        const startOfDay = new Date(rideTime);
-        startOfDay.setHours(0, 0, 0, 0);
-        const endOfDay = new Date(rideTime);
-        endOfDay.setHours(23, 59, 59, 999);
-        
-        const existingRides = await require('../models/Ride').find({
-          driverPhone: driverPhone,
-          status: { $in: ['auto_accepted', 'confirmed', 'in_progress'] },
-          requestedTime: {
-            $gte: startOfDay,
-            $lte: endOfDay
-          }
-        }).sort({ requestedTime: 1 });
-        
-        if (existingRides.length > 0) {
-          console.log(`📅 Found ${existingRides.length} existing ride(s) for driver ${driverPhone} on ${rideTime.toDateString()}`);
-          
-          // Check distance from each existing ride location to new pickup
-          for (const existingRide of existingRides) {
-            try {
-              // Check distance from existing ride's destination to new pickup
-              const distanceFromDestination = await calculateDistance(existingRide.to, pickupLocation);
-              
-              if (distanceFromDestination.duration !== null) {
-                const MINIMUM_TRAVEL_TIME_HOURS = 2;
-                const SAME_AREA_THRESHOLD_MINUTES = 30; // Allow if very close (same area)
-                const travelTimeHours = distanceFromDestination.duration / 60;
-                const travelTimeMinutes = distanceFromDestination.duration;
-                
-                console.log(`📏 Distance from existing ride destination (${existingRide.to}) to new pickup (${pickupLocation}): ${distanceFromDestination.distance}km, ${distanceFromDestination.duration} minutes`);
-                
-                // Allow if very close (same area) OR if far enough apart
-                if (travelTimeMinutes > SAME_AREA_THRESHOLD_MINUTES && travelTimeHours <= MINIMUM_TRAVEL_TIME_HOURS) {
-                  console.log(`❌ New ride in problematic middle distance: ${travelTimeHours.toFixed(1)} hours travel time (minimum ${MINIMUM_TRAVEL_TIME_HOURS} hours required, or under ${SAME_AREA_THRESHOLD_MINUTES} minutes for same area)`);
-                  return {
-                    valid: false,
-                    reason: `Driver has another ride too close on the same date. Travel time between rides would be ${travelTimeHours.toFixed(1)} hours (minimum ${MINIMUM_TRAVEL_TIME_HOURS} hours required, or rides must be in same area within ${SAME_AREA_THRESHOLD_MINUTES} minutes)`,
-                    distance: distanceFromDestination.distance,
-                    duration: distanceFromDestination.duration,
-                    conflictingRide: {
-                      rideId: existingRide.rideId,
-                      time: existingRide.requestedTime,
-                      destination: existingRide.to
-                    }
-                  };
-                } else if (travelTimeMinutes <= SAME_AREA_THRESHOLD_MINUTES) {
-                  console.log(`✅ New ride in same area as existing ride: ${travelTimeMinutes} minutes travel time (under ${SAME_AREA_THRESHOLD_MINUTES} minutes threshold)`);
-                } else {
-                  console.log(`✅ New ride has sufficient separation: ${travelTimeHours.toFixed(1)} hours travel time (over ${MINIMUM_TRAVEL_TIME_HOURS} hours threshold)`);
-                }
-              }
-              
-              // Also check distance from existing ride's pickup to new pickup
-              const distanceFromPickup = await calculateDistance(existingRide.from, pickupLocation);
-              
-              if (distanceFromPickup.duration !== null) {
-                const MINIMUM_TRAVEL_TIME_HOURS = 2;
-                const SAME_AREA_THRESHOLD_MINUTES = 30; // Allow if very close (same area)
-                const travelTimeHours = distanceFromPickup.duration / 60;
-                const travelTimeMinutes = distanceFromPickup.duration;
-                
-                console.log(`📏 Distance from existing ride pickup (${existingRide.from}) to new pickup (${pickupLocation}): ${distanceFromPickup.distance}km, ${distanceFromPickup.duration} minutes`);
-                
-                // Allow if very close (same area) OR if far enough apart
-                if (travelTimeMinutes > SAME_AREA_THRESHOLD_MINUTES && travelTimeHours <= MINIMUM_TRAVEL_TIME_HOURS) {
-                  console.log(`❌ New ride in problematic middle distance from existing pickup: ${travelTimeHours.toFixed(1)} hours travel time (minimum ${MINIMUM_TRAVEL_TIME_HOURS} hours required, or under ${SAME_AREA_THRESHOLD_MINUTES} minutes for same area)`);
-                  return {
-                    valid: false,
-                    reason: `Driver has another ride too close on the same date. Travel time between ride locations would be ${travelTimeHours.toFixed(1)} hours (minimum ${MINIMUM_TRAVEL_TIME_HOURS} hours required, or rides must be in same area within ${SAME_AREA_THRESHOLD_MINUTES} minutes)`,
-                    distance: distanceFromPickup.distance,
-                    duration: distanceFromPickup.duration,
-                    conflictingRide: {
-                      rideId: existingRide.rideId,
-                      time: existingRide.requestedTime,
-                      pickup: existingRide.from
-                    }
-                  };
-                } else if (travelTimeMinutes <= SAME_AREA_THRESHOLD_MINUTES) {
-                  console.log(`✅ New ride in same area as existing pickup: ${travelTimeMinutes} minutes travel time (under ${SAME_AREA_THRESHOLD_MINUTES} minutes threshold)`);
-                } else {
-                  console.log(`✅ New ride has sufficient separation from existing pickup: ${travelTimeHours.toFixed(1)} hours travel time (over ${MINIMUM_TRAVEL_TIME_HOURS} hours threshold)`);
-                }
-              }
-              
-            } catch (distanceError) {
-              console.error(`❌ Error calculating distance to existing ride:`, distanceError.message);
-              // Continue checking other rides if one fails
-            }
-          }
-          
-          console.log(`✅ All existing rides on same date have sufficient distance separation`);
-        }
-        
-        console.log(`✅ Future booking validation passed - no conflicting rides found`);
-        return { 
-          valid: true, 
-          reason: `Future booking (${Math.round(hoursUntilRide)} hours in advance) - no conflicting rides on same date`,
-          distance: null,
-          duration: null,
-          futureBooking: true,
-          hoursUntilRide: hoursUntilRide,
-          existingRidesChecked: existingRides.length
-        };
-      }
-    }
     
     const lastLocation = await getDriverLastLocation(driverPhone);
     
     if (!lastLocation) {
       console.log(`✅ No previous location for driver ${driverPhone}, allowing pickup`);
       return { valid: true, reason: 'First ride for driver' };
-    }
-    
-    // Check if location data is older than 2 hours
-    if (lastLocation.lastUpdated) {
-      const now = new Date();
-      const locationAge = (now - new Date(lastLocation.lastUpdated)) / (1000 * 60); // in minutes
-      const TWO_HOURS_IN_MINUTES = 120;
-      
-      if (locationAge > TWO_HOURS_IN_MINUTES) {
-        console.log(`✅ Driver ${driverPhone} location is stale (${Math.round(locationAge)} minutes old), allowing pickup`);
-        return { 
-          valid: true, 
-          reason: `Location data is stale (${Math.round(locationAge/60)} hours old) - ride allowed`,
-          distance: null,
-          duration: null,
-          locationAge: locationAge
-        };
-      }
     }
     
     let fromLocation = lastLocation.address;
@@ -419,7 +281,7 @@ async function bookRideInternal(rideData) {
     
     console.log(`🚗 Starting ride booking validation for driver ${driverPhone}`);
     
-    const pickupValidation = await validateDriverPickupDistance(driverPhone, from, time);
+    const pickupValidation = await validateDriverPickupDistance(driverPhone, from);
     
     if (!pickupValidation.valid) {
       console.log(`❌ Driver pickup validation failed: ${pickupValidation.reason}`);
@@ -443,7 +305,7 @@ async function bookRideInternal(rideData) {
       
       // Send notification to rider
       const rejectionMessage = `❌ *Ride Request Rejected*\n\n📍 *Pickup:* ${from}\n🎯 *Destination:* ${to}\n⏰ *Time:* ${moment(time).format('MMM DD, YYYY h:mm A')}\n\n*Reason:* ${pickupValidation.reason}\n\nPlease try a different driver or contact support.`;
-      await sendNotification(riderPhone, rejectionMessage);
+      await sendNotification(`whatsapp:${riderPhone}`, rejectionMessage);
       
       // Return proper rejection response
       return {
@@ -638,21 +500,14 @@ function generateAlternativeTimes(originalTime) {
 async function sendAutomatedNotifications(ride, conflictResult, conflictResolution) {
   try {
     const status = ride.status;
-    const driverPhone = ride.driverPhone;
-    const riderPhone = ride.riderPhone;
+    const driverPhone = `whatsapp:${ride.driverPhone}`;
+    const riderPhone = `whatsapp:${ride.riderPhone}`;
     
     if (status === "auto_accepted") {
       // Notify driver
       const driverMessage = `🚗 *New Ride Confirmed!*\n\n📍 *Pickup:* ${ride.from}\n🎯 *Destination:* ${ride.to}\n⏰ *Time:* ${moment(ride.requestedTime).format('MMM DD, YYYY h:mm A')}\n⏱️ *Duration:* ${ride.estimatedDuration} minutes\n📱 *Rider:* ${ride.riderPhone}\n\nRide ID: ${ride.rideId}`;
       await sendNotification(driverPhone, driverMessage);
       
-      // Clear conversation history after successful booking
-      try {
-        await clearConversationHistory(riderPhone);
-        console.log(`✅ Conversation history cleared for rider ${riderPhone} after successful booking`);
-      } catch (clearError) {
-        console.error(`❌ Failed to clear conversation history for rider ${riderPhone}:`, clearError.message);
-      }
       
     } else if (status === "auto_rejected") {
       // **FIXED: Enhanced rejection message with proper conflict resolution**
@@ -692,14 +547,6 @@ async function sendAutomatedNotifications(ride, conflictResult, conflictResoluti
       rejectionMessage += `\n\nType 'restart' to book a new ride.`;
       
       await sendNotification(riderPhone, rejectionMessage);
-      
-      // Clear conversation history after rejection to allow fresh start
-      try {
-        await clearConversationHistory(riderPhone);
-        console.log(`✅ Conversation history cleared for rider ${riderPhone} after ride rejection`);
-      } catch (clearError) {
-        console.error(`❌ Failed to clear conversation history after rejection for rider ${riderPhone}:`, clearError.message);
-      }
     }
     
   } catch (error) {
@@ -744,4 +591,4 @@ module.exports = {
   sendAutomatedNotifications,
   getRideStatus,
   findNearestAvailableDrivers  // **NEW: Find nearest available drivers**
-};
+}; 

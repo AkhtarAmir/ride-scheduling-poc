@@ -55,8 +55,8 @@ class VectorDBService {
     return await this.bookingExtractor.extractBookingData(phone, conversationHistory);
   }
 
-  shouldValidateLocationWithGoogle(message, bookingData, isFromWhatsApp = false) {
-    return this.bookingExtractor.shouldValidateLocationWithGoogle(message, bookingData, isFromWhatsApp);
+  shouldValidateLocationWithGoogle(message, bookingData) {
+    return this.bookingExtractor.shouldValidateLocationWithGoogle(message, bookingData);
   }
 
   // Driver preferences
@@ -120,7 +120,7 @@ class VectorDBService {
   }
 
   // Main intelligent response generation (the complex logic from the original file)
-  async generateIntelligentResponse(phone, message, conversationHistory = [], preExtractedBookingData = null, isFromWhatsApp = false) {
+  async generateIntelligentResponse(phone, message, conversationHistory = [], preExtractedBookingData = null) {
     try {
       if (!this.isInitialized) {
         throw new Error("Vector Database Service not initialized");
@@ -168,7 +168,7 @@ class VectorDBService {
             shouldValidate: true,
             locationType: bookingData.acceptedAsLocation,
             locationToValidate: message
-          }, bookingData, isFromWhatsApp);
+          }, bookingData);
           
           if (locationValidationResult) {
             console.log(`❌ Google Maps validation failed, returning error message`);
@@ -275,14 +275,14 @@ class VectorDBService {
     return null;
   }
 
-  async handleLocationValidation(phone, message, needsLocationValidation, bookingData, isFromWhatsApp = false) {
+  async handleLocationValidation(phone, message, needsLocationValidation, bookingData) {
 
     const locationToValidate = needsLocationValidation.locationToValidate || message;
     
     console.log(`🗺️ Validating location with Google Maps: "${locationToValidate}"`);
     
     // Use the new Google validation from BookingExtractor
-    const googleValidation = await this.bookingExtractor.validateLocationDirectly(locationToValidate, isFromWhatsApp);
+    const googleValidation = await this.bookingExtractor.validateLocationDirectly(locationToValidate);
     
     if (!googleValidation.isValid) {
       const errorMessage = `❌ ${googleValidation.reason}\n\nPlease provide a valid ${needsLocationValidation.locationType} location:\n• Try being more specific with the area name\n• Include the city name (e.g., "Main Market, Lahore")\n• Use a nearby landmark\n• Double-check the spelling`;

@@ -47,6 +47,7 @@ async function updateConversationStep(phone, step, data = {}) {
   }
 }
 
+// **NEW: Function to clear conversation history and reset state**
 async function clearConversationHistory(phone) {
   try {
     console.log(`🧹 Clearing conversation history and ALL booking data for ${phone}`);
@@ -57,7 +58,6 @@ async function clearConversationHistory(phone) {
       {
         conversationHistory: [],           // Clear conversation history
         rideData: {},                     // Clear ride data completely
-        lastValidContext: null,           // Clear stored context that AI uses
         step: 'ai_managed',               // Reset step
         lastMessageAt: new Date(),
         // Keep aiEnabled and isActive as they were
@@ -71,15 +71,14 @@ async function clearConversationHistory(phone) {
   }
 }
 
-async function processConversationMessage(phone, message, isFromWhatsApp = false) {
+async function processConversationMessage(phone, message) {
   try {
     const conversation = await getOrCreateConversation(phone);
     
     // **NEW: Check for restart commands before adding to history**
     const restartCommands = [
       'another ride', 'new ride', 'book another ride', 'next ride', 
-      'start over', 'restart', 'new booking', 'fresh ride',
-      
+      'start over', 'restart', 'new booking', 'fresh ride'
     ];
     
     const cleanMessage = message.toLowerCase().trim();
@@ -123,11 +122,7 @@ async function processConversationMessage(phone, message, isFromWhatsApp = false
     if (conversation.aiEnabled) {
       console.log(`🤖 Routing to AI handler for ${phone}`);
       const aiHandler = require('./aiHandler');
-      // Use AI handler for intelligent responses
-      if (conversation.step === 'awaiting_response') {
-        return await aiHandler.processAIMessage(conversation, message, isFromWhatsApp);
-      }
-      return await aiHandler.processAIMessage(conversation, message, isFromWhatsApp);
+      return await aiHandler.processAIMessage(conversation, message);
     } else {
       console.log(`📋 Routing to traditional handler for ${phone}`);
       const traditionalHandler = require('./traditionalHandler');

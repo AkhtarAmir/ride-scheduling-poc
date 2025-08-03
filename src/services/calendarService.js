@@ -1,8 +1,8 @@
-const { calendar } = require('../../../config/google');
-const { checkTimeOverlap } = require('../utils/timeUtils');
+const { calendar } = require('../config/google');
 const moment = require('moment');
 
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'primary';
+
 
 async function checkCalendarConflicts(driverPhone, riderPhone, requestedTime, duration = 60) {
   try {
@@ -29,6 +29,7 @@ async function checkCalendarConflicts(driverPhone, riderPhone, requestedTime, du
     let hasRiderConflict = false;
     
     try {
+    
       const searchStartTime = startTime.clone().subtract(2, 'hours'); 
       const searchEndTime = endTime.clone().add(2, 'hours');           
       
@@ -125,8 +126,11 @@ async function checkCalendarConflicts(driverPhone, riderPhone, requestedTime, du
                 eventEnd: eventEnd.format()
               }
             });
+            
+          } else {
           }
         });
+      } else {  
       }
       
     } catch (calendarError) {
@@ -176,8 +180,10 @@ async function checkCalendarConflicts(driverPhone, riderPhone, requestedTime, du
   }
 }
 
+
 async function createCalendarEvent(ride) {
   try {
+    
     if (!calendar) {
       console.warn('⚠️ Google Calendar not available, skipping event creation');
       return null;
@@ -211,6 +217,7 @@ async function createCalendarEvent(ride) {
       resource: event,
     });
     
+    
     return response.data.id;
     
   } catch (error) {
@@ -220,7 +227,24 @@ async function createCalendarEvent(ride) {
   }
 }
 
+function checkTimeOverlap(start1, end1, start2, end2) { 
+  const overlap = start1.isBefore(end2) && start2.isBefore(end1);
+  
+  if (overlap) { 
+    const overlapStart = moment.max(start1, start2);
+    const overlapEnd = moment.min(end1, end2);
+    const overlapMinutes = overlapEnd.diff(overlapStart, 'minutes');
+    
+    console.log(`         Overlap Period: ${overlapStart.format()} to ${overlapEnd.format()} (${overlapMinutes} minutes)`);
+    return true;
+  }
+  
+  return overlap;
+}
+
+
 module.exports = {
   checkCalendarConflicts,
-  createCalendarEvent
+  createCalendarEvent,
+  checkTimeOverlap
 }; 
