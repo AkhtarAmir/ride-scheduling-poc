@@ -79,6 +79,30 @@ const DriverSchema = new mongoose.Schema(
       },
       calendarId: String,
       lastSync: Date
+    },
+    currentLocation: {
+      address: {
+        type: String,
+        default: null
+      },
+      coordinates: {
+        lat: Number,
+        lng: Number
+      },
+      lastUpdated: {
+        type: Date,
+        default: null
+      }
+    },
+    serviceArea: {
+      maxDistance: {
+        type: Number,
+        default: 10 // 10 km default
+      },
+      maxDuration: {
+        type: Number,
+        default: 20 // 20 minutes default
+      }
     }
   },
   { 
