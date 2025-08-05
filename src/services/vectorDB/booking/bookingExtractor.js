@@ -200,17 +200,30 @@ VAGUE INPUTS THAT NEED CLARIFICATION:
 - "work", "home", "my home", "my work", "office" (without context)
 - "here", "there", "this place", "that place"
 - "somewhere", "anywhere", "nowhere", "nothing"
-- **BROAD CITY-ONLY LOCATIONS:** "lahore", "lahore pakistan", "karachi", "islamabad", "rawalpindi"
+- **BROAD CITY-ONLY LOCATIONS:** 
+  • Pakistan: "lahore", "lahore pakistan", "karachi", "islamabad", "rawalpindi", "faisalabad"
+  • US: "new york", "los angeles", "chicago", "houston", "phoenix", "philadelphia", "san antonio", "san diego", "dallas", "austin", "manhattan", "brooklyn", "queens"
 - Very short responses (less than 3 characters)
 - Repetitive characters or obvious gibberish
 EXAMPLE SCENARIOS:
+**PAKISTAN EXAMPLES:**
 - Assistant suggests driver "03019581634"
 - User says "yes" → Extract: driverPhone: "03019581634", needsClarification: false
 - User says "iqbal town" → Extract: driverPhone: null, needsClarification: false (valid location)
 - User says "lahore pakistan" → Extract: driverPhone: null, needsClarification: true, clarificationMessage: "Please provide a more specific location within lahore pakistan, such as an area, landmark, or neighborhood."
 - User says "emporium mall lahore" → Extract: driverPhone: null, needsClarification: false (valid specific location)
-- User says "dunno" → Extract: driverPhone: null, needsClarification: true
 - User says "03001234567" → Extract: driverPhone: "03001234567", needsClarification: false
+
+**US EXAMPLES:**
+- Assistant suggests driver "+15551234567"
+- User says "yes" → Extract: driverPhone: "+15551234567", needsClarification: false
+- User says "times square" → Extract: driverPhone: null, needsClarification: false (valid location)
+- User says "new york" → Extract: driverPhone: null, needsClarification: true, clarificationMessage: "Please provide a more specific location within new york, such as a neighborhood, landmark, or address."
+- User says "jfk airport" → Extract: driverPhone: null, needsClarification: false (valid specific location)
+- User says "5551234567" → Extract: driverPhone: "+15551234567", needsClarification: false (normalized to international format)
+
+**GENERAL EXAMPLES:**
+- User says "dunno" → Extract: driverPhone: null, needsClarification: true
 - User says "auto assign" → Extract: driverPhone: null, responseType: "auto_assign_request", needsClarification: false
 - User says "automatic" → Extract: driverPhone: null, responseType: "auto_assign_request", needsClarification: false
 - **IMPORTANT**: User says "auto assign" with existing booking data → Extract: from: "iqbal town", to: "johar town", dateTime: "2025-07-29 15:00", driverPhone: null, responseType: "auto_assign_request", needsClarification: false

@@ -71,11 +71,11 @@ Please try a different time or contact support.`;
 }
 
 function formatPickupLocationPrompt() {
-  return "🚗 *New Ride Booking*\n\nWhere would you like to be picked up from?\n\nPlease provide a pickup location (e.g., 'Home', 'Airport', '123 Main St')";
+  return "🚗 *New Ride Booking*\n\nWhere would you like to be picked up from?\n\n📍 Examples:\n🇵🇰 Pakistan: 'DHA Phase 5', 'Gulberg III', 'Emporium Mall Lahore'\n🇺🇸 US: 'Times Square NYC', 'LAX Airport', '123 Main St Chicago'";
 }
 
 function formatDestinationPrompt(pickup) {
-  return `📍 *Pickup:* ${pickup}\n\nWhere would you like to go?\n\nPlease provide a destination (e.g., 'Work', 'Mall', '456 Oak Ave')`;
+  return `📍 *Pickup:* ${pickup}\n\nWhere would you like to go?\n\n🎯 Examples:\n🇵🇰 Pakistan: 'Liberty Market', 'Packages Mall', 'F-10 Markaz Islamabad'\n🇺🇸 US: 'Central Park NYC', 'Hollywood Blvd', '456 Oak Ave'`;
 }
 
 function formatTimePrompt(pickup, destination) {
@@ -83,7 +83,7 @@ function formatTimePrompt(pickup, destination) {
 }
 
 function formatDriverPrompt(pickup, destination, time, duration) {
-  return `📍 *Pickup:* ${pickup}\n🎯 *Destination:* ${destination}\n⏰ *Time:* ${time}\n⏱️ *Estimated Duration:* ${duration || 60} minutes\n\nWhat's the driver's phone number? (e.g., +1234567890)`;
+  return `📍 *Pickup:* ${pickup}\n🎯 *Destination:* ${destination}\n⏰ *Time:* ${time}\n⏱️ *Estimated Duration:* ${duration || 60} minutes\n\nWhat's the driver's phone number?\n\n📱 Examples:\n🇵🇰 Pakistan: +923001234567 or 03001234567\n🇺🇸 US: +15551234567 or 5551234567`;
 }
 
 function formatTimeError(error, pickup, destination) {
@@ -92,14 +92,14 @@ function formatTimeError(error, pickup, destination) {
 
 function formatInvalidLocationError(locationType) {
   const examples = locationType === 'pickup' 
-    ? "Please provide a pickup location (e.g., 'Home', 'Airport', '123 Main St')"
-    : "Please provide a destination (e.g., 'Work', 'Mall', '456 Oak Ave')";
+    ? "Please provide a pickup location:\n🇵🇰 Pakistan: 'DHA Phase 5', 'Gulberg III', 'Airport'\n🇺🇸 US: 'Times Square', 'LAX Airport', '123 Main St'"
+    : "Please provide a destination:\n🇵🇰 Pakistan: 'Liberty Market', 'Packages Mall', 'F-10 Markaz'\n🇺🇸 US: 'Central Park', 'Hollywood Blvd', '456 Oak Ave'";
     
   return `${examples}\n\nOr type 'help' for available commands.`;
 }
 
 function formatInvalidPhoneError() {
-  return "Please provide a valid phone number (e.g., +1234567890 or 1234567890)";
+  return "Please provide a valid phone number:\n📱 Pakistan: +923001234567 or 03001234567\n📱 US: +15551234567 or 5551234567";
 }
 
 function formatInvalidTimeError() {

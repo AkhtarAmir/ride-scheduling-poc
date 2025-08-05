@@ -20,7 +20,7 @@ async function sendNotification(to, message) {
     
     // Add whatsapp: prefix to from number for WhatsApp
     const whatsappFrom = `whatsapp:${fromNumber}`;
-    let normalizedTo = normalizePakistaniNumber(to);
+    let normalizedTo = normalizePhoneNumber(to);
 
     if (!normalizedTo) {
       console.error(`Invalid phone number format: ${to}`);
@@ -60,29 +60,55 @@ async function sendNotification(to, message) {
     return { success: false, error: error.message };
   }
 }
-function normalizePakistaniNumber(number) {
-  // Remove non-digit characters
-  number = number.replace(/\D/g, '');
+function normalizePhoneNumber(number) {
+  // Remove non-digit characters except '+' at the beginning
+  const cleanNumber = number.replace(/[^\d+]/g, '');
+  
+  // Extract just digits for processing
+  const digitsOnly = cleanNumber.replace(/\D/g, '');
 
-  // If it starts with '03', it's a local number — convert to international
-  if (/^03\d{9}$/.test(number)) {
-    return `+92${number.slice(1)}`;
+  // Handle Pakistani numbers
+  // If it starts with '03', it's a local Pakistani number — convert to international
+  if (/^03\d{9}$/.test(digitsOnly)) {
+    return `+92${digitsOnly.slice(1)}`;
   }
 
   // If it starts with '92', prepend '+'
-  if (/^92\d{10}$/.test(number)) {
-    return `+${number}`;
+  if (/^92\d{10}$/.test(digitsOnly)) {
+    return `+${digitsOnly}`;
   }
 
-  // If already starts with +92 and is valid
-  if (/^\+92\d{10}$/.test(`+${number}`)) {
-    return `+${number}`;
+  // If already starts with +92 and is valid Pakistani number
+  if (/^\+92\d{10}$/.test(cleanNumber)) {
+    return cleanNumber;
   }
 
-  return null; // Invalid
+  // Handle American numbers
+  // If it's a 10-digit number, assume it's a US local number
+  if (/^\d{10}$/.test(digitsOnly)) {
+    return `+1${digitsOnly}`;
+  }
+
+  // If it starts with '1' and has 11 digits total, it's a US number
+  if (/^1\d{10}$/.test(digitsOnly)) {
+    return `+${digitsOnly}`;
+  }
+
+  // If already starts with +1 and is valid US number
+  if (/^\+1\d{10}$/.test(cleanNumber)) {
+    return cleanNumber;
+  }
+
+  // Handle other international formats that are already properly formatted
+  if (/^\+[1-9]\d{1,14}$/.test(cleanNumber)) {
+    return cleanNumber;
+  }
+
+  return null; // Invalid format
 }
 
 
 module.exports = {
-  sendNotification
+  sendNotification,
+  normalizePhoneNumber
 }; 
