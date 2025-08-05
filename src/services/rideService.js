@@ -305,7 +305,7 @@ async function bookRideInternal(rideData) {
       
       // Send notification to rider
       const rejectionMessage = `❌ *Ride Request Rejected*\n\n📍 *Pickup:* ${from}\n🎯 *Destination:* ${to}\n⏰ *Time:* ${moment(time).format('MMM DD, YYYY h:mm A')}\n\n*Reason:* ${pickupValidation.reason}\n\nPlease try a different driver or contact support.`;
-      await sendNotification(`whatsapp:${riderPhone}`, rejectionMessage);
+      await sendNotification(riderPhone, rejectionMessage);
       
       // Return proper rejection response
       return {
@@ -500,8 +500,8 @@ function generateAlternativeTimes(originalTime) {
 async function sendAutomatedNotifications(ride, conflictResult, conflictResolution) {
   try {
     const status = ride.status;
-    const driverPhone = `whatsapp:${ride.driverPhone}`;
-    const riderPhone = `whatsapp:${ride.riderPhone}`;
+    const driverPhone = ride.driverPhone;
+    const riderPhone = ride.riderPhone;
     
     if (status === "auto_accepted") {
       // Notify driver

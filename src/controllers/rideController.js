@@ -141,7 +141,7 @@ async function whatsappWebhook(req, res) {
       
       // Send response back via WhatsApp only if there's a message to send
       if (responseMessage) {
-        await sendNotification(from, responseMessage);
+        await sendNotification(phoneNumber, responseMessage);
       } else {
         console.log(`No response message to send (likely handled by another service)`);
       }
@@ -157,7 +157,7 @@ async function whatsappWebhook(req, res) {
       const textOnlyMessage = "I can only help with text messages and locations. Please provide your ride booking details as text (pickup location, destination, and preferred time) or share your location.";
       
       // Send response back via WhatsApp
-      await sendNotification(from, textOnlyMessage);
+      await sendNotification(phoneNumber, textOnlyMessage);
       
       // Respond to Twilio webhook
       return res.status(200).send('OK');
@@ -170,7 +170,7 @@ async function whatsappWebhook(req, res) {
     
     // Send response back via WhatsApp only if there's a message to send
     if (responseMessage) {
-      await sendNotification(from, responseMessage);
+      await sendNotification(phoneNumber, responseMessage);
     } else {
       console.log(`No response message to send (likely handled by another service)`);
     }

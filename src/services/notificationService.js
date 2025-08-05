@@ -20,7 +20,14 @@ async function sendNotification(to, message) {
     
     // Add whatsapp: prefix to from number for WhatsApp
     const whatsappFrom = `whatsapp:${fromNumber}`;
-    let normalizedTo = normalizePhoneNumber(to);
+    
+    // Clean the 'to' number if it accidentally has whatsapp: prefix
+    let cleanToNumber = to;
+    if (cleanToNumber.includes('whatsapp:')) {
+      cleanToNumber = cleanToNumber.replace('whatsapp:', '');
+    }
+    
+    let normalizedTo = normalizePhoneNumber(cleanToNumber);
 
     if (!normalizedTo) {
       console.error(`Invalid phone number format: ${to}`);
