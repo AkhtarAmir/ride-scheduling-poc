@@ -232,9 +232,8 @@ async function validateDriverPickupDistance(driverPhone, pickupLocation) {
     
     console.log(`📏 Distance from driver's last location (${fromLocation}) to pickup (${toLocation}): ${distance}km, ${duration} minutes`);
     
-    // **FIXED: Changed from 50km to 10km as per requirements**
-    const MAX_DISTANCE_KM = process.env.MAX_DRIVER_DISTANCE_KM || 10;   // Changed from 50 to 10
-    const MAX_DURATION_MIN = process.env.MAX_DRIVER_DURATION_MIN || 30;  // Changed from 60 to 30
+    const MAX_DISTANCE_KM = process.env.MAX_DRIVER_DISTANCE_KM || 20;   
+    const MAX_DURATION_MIN = process.env.MAX_DRIVER_DURATION_MIN || 60;  
     
     if (distance > MAX_DISTANCE_KM) {
       console.log(`❌ Distance exceeds limit: ${distance}km > ${MAX_DISTANCE_KM}km`);
